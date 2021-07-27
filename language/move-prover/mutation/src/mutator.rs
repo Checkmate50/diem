@@ -38,6 +38,20 @@ pub fn mutate(args: &[String]) {
         .about("Mutation tool for the move prover")
         .author("The Diem Core Contributors")
         .arg(
+            Arg::with_name("config")
+                .short("c")
+                .long("config")
+                .takes_value(true)
+                .multiple(true)
+                .number_of_values(1)
+                .value_name("CONFIG_PATH")
+                .help(
+                    "path to a prover toml configuration file. The benchmark output will be \
+                          stored at `CONFIG_PATH.data. This can be repeated so different \
+                          configurations are benchmarked against the same set of input modules.",
+                ),
+        )
+        .arg(
             Arg::with_name("dependencies")
                 .long("dependency")
                 .short("d")
