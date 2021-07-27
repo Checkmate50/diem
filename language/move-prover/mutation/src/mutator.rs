@@ -4,21 +4,19 @@
 // Functions for running benchmarks and storing the results as files, as well as reading
 // benchmark data back into memory.
 
-use anyhow::anyhow;
 use bytecode::options::ProverOptions;
 use clap::{App, Arg};
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
-use itertools::Itertools;
 use log::LevelFilter;
+use itertools::Itertools;
 use move_model::{
-    model::{FunctionEnv, GlobalEnv, ModuleEnv, VerificationScope},
+    model::{GlobalEnv, ModuleEnv, VerificationScope},
     run_model_builder,
 };
 use move_prover::{
     check_errors, cli::Options, create_and_process_bytecode, generate_boogie, verify_boogie,
 };
 use std::{
-    fmt::Debug,
     fs::File,
     io::{LineWriter, Write},
     path::PathBuf,
@@ -32,7 +30,6 @@ struct Runner {
     options: Options,
     out: LineWriter<File>,
     error_writer: StandardStream,
-    per_function: bool,
 }
 
 pub fn mutate(args: &[String]) {
@@ -70,22 +67,45 @@ pub fn mutate(args: &[String]) {
     let sources = get_vec("sources");
     let deps = get_vec("dependencies");
 
-    if let Err(s) = apply_mutation(&out, &sources, &deps) {
-        println!("ERROR: execution failed: {}", s);
+    let configs: Vec<Option<String>> = if matches.is_present("config") {
+        get_vec("config").into_iter().map(Some).collect_vec()
     } else {
-        println!("results stored at `{}`", out);
+        vec![None]
+    };
+
+    for config_spec in configs {
+        let (config, out) = if let Some(config_file) = &config_spec {
+            let extension = "mod_data";
+            let out = PathBuf::from(config_file)
+                .with_extension(extension)
+                .to_string_lossy()
+                .to_string();
+            (config_spec, out)
+        } else {
+            (None, "benchmark.data".to_string())
+        };
+        if let Err(s) = apply_mutation(&out, config.as_ref(), &sources, &deps) {
+            println!("ERROR: execution failed: {}", s);
+        } else {
+            println!("results stored at `{}`", out);
+        }
     }
 }
 
 fn apply_mutation(
     out: &str,
+    config_file_opt: Option<&String>,
     modules: &[String],
     dep_dirs: &[String],
 ) -> anyhow::Result<()> {
     println!("building model");
     let env = run_model_builder(modules, dep_dirs)?;
     let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
-    let mut options = Options::default();
+    let mut options = if let Some(config_file) = config_file_opt {
+        Options::create_from_toml_file(config_file)?
+    } else {
+        Options::default()
+    };
 
     // Do not allow any mutation to run longer than 100 seconds to avoid absolute insanity
     options.backend.hard_timeout_secs = 100;
@@ -96,17 +116,14 @@ fn apply_mutation(
     options.setup_logging();
     check_errors(&env, &options, &mut error_writer, "unexpected build errors")?;
 
-    let config_descr = if let Some(config) = config_file_opt {
-        config.clone()
-    } else {
-        "default".to_string()
-    };
+    let config_descr = "default".to_string();
+
+    let out = LineWriter::new(File::create(out)?);
 
     let mut runner = Runner {
         options,
         out,
         error_writer,
-        per_function,
     };
     println!(
         "Starting benchmarking with config `{}`.\n\
@@ -120,7 +137,7 @@ impl Runner {
     fn mutate(&mut self, env: &GlobalEnv) -> anyhow::Result<()> {
         for module in env.get_modules() {
             if module.is_target() {
-                self.mutate_module(module);
+                self.mutate_module(module)?;
             }
         }
         Ok(())

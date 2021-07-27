@@ -4,11 +4,11 @@
 #![forbid(unsafe_code)]
 
 use itertools::Itertools;
-use mutation::mutator;
+use prover_mutation::mutator;
 
 fn main() {
     let args = std::env::args().collect_vec();
-    if (args.len() > 1 && matches!(args[1].as_str(), "-h" | "--help")) {
+    if args.len() > 1 && matches!(args[1].as_str(), "-h" | "--help") {
         println!("mutation: optionally select a subset of mutations to perform");
         println!("Use `prover-lab <tool> -h` for tool specific information.");
         std::process::exit(1);

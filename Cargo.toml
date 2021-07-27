@@ -99,6 +99,7 @@ members = [
     "language/move-prover/interpreter/crypto",
     "language/move-prover/interpreter-testsuite",
     "language/move-prover/lab",
+    "language/move-prover/mutation",
     "language/move-prover/test-utils",
     "language/move-stdlib",
     "language/move-vm/integration-tests",
