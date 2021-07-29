@@ -1,10 +1,12 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Functions for running benchmarks and storing the results as files, as well as reading
-// benchmark data back into memory.
+// Functions for running move programs with mutations and reporting errors if found
 
-use bytecode::options::ProverOptions;
+use bytecode::{
+    options::ProverOptions,
+    mutation_tester::MutationManager,
+};
 use clap::{App, Arg};
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 use log::LevelFilter;
@@ -17,18 +19,16 @@ use move_prover::{
     check_errors, cli::Options, create_and_process_bytecode, generate_boogie, verify_boogie,
 };
 use std::{
-    fs::File,
-    io::{LineWriter, Write},
+    io::{Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 // ============================================================================================
-// Command line interface for running a benchmark
+// Command line interface for running a mutation
 
 struct Runner {
     options: Options,
-    out: LineWriter<File>,
     error_writer: StandardStream,
 }
 
@@ -46,9 +46,9 @@ pub fn mutate(args: &[String]) {
                 .number_of_values(1)
                 .value_name("CONFIG_PATH")
                 .help(
-                    "path to a prover toml configuration file. The benchmark output will be \
+                    "path to a prover toml configuration file. The mutation output will be \
                           stored at `CONFIG_PATH.data. This can be repeated so different \
-                          configurations are benchmarked against the same set of input modules.",
+                          configurations can be checked against the same set of input modules.",
                 ),
         )
         .arg(
@@ -96,9 +96,9 @@ pub fn mutate(args: &[String]) {
                 .to_string();
             (config_spec, out)
         } else {
-            (None, "benchmark.data".to_string())
+            (None, "mutation.data".to_string())
         };
-        if let Err(s) = apply_mutation(&out, config.as_ref(), &sources, &deps) {
+        if let Err(s) = apply_mutation(config.as_ref(), &sources, &deps) {
             println!("ERROR: execution failed: {}", s);
         } else {
             println!("results stored at `{}`", out);
@@ -107,7 +107,6 @@ pub fn mutate(args: &[String]) {
 }
 
 fn apply_mutation(
-    out: &str,
     config_file_opt: Option<&String>,
     modules: &[String],
     dep_dirs: &[String],
@@ -121,44 +120,65 @@ fn apply_mutation(
         Options::default()
     };
 
-    // Do not allow any mutation to run longer than 100 seconds to avoid absolute insanity
+    // Do not allow any mutation to run longer than 100 seconds to avoid extremely long use times
     options.backend.hard_timeout_secs = 100;
 
     options.verbosity_level = LevelFilter::Error;
 
+    options.prover.mutation = true;
     options.backend.derive_options();
     options.setup_logging();
     check_errors(&env, &options, &mut error_writer, "unexpected build errors")?;
 
     let config_descr = "default".to_string();
 
-    let out = LineWriter::new(File::create(out)?);
+    println!(
+        "Starting mutations with config `{}`.",
+        config_descr
+    );
+
+    let mut i = 0;
+    let mut mutation_applied = true;
 
     let mut runner = Runner {
         options,
-        out,
         error_writer,
     };
-    println!(
-        "Starting benchmarking with config `{}`.\n\
-        Notice that execution is slow because we enforce single core execution.",
-        config_descr
-    );
-    runner.mutate(&env)
+
+    while mutation_applied {
+        i += 1;
+        println!("Applying add-sub mutation {}", i);
+        runner.options.prover.mutation_add_sub = i;
+        env.set_extension(MutationManager {
+            mutated: false,
+            add_sub: i,
+        });
+        mutation_applied = runner.mutate(&env)?;
+    }
+    Ok(())
 }
 
 impl Runner {
-    fn mutate(&mut self, env: &GlobalEnv) -> anyhow::Result<()> {
+    fn mutate(&mut self, env: &GlobalEnv) -> anyhow::Result<bool> {
+        let mut mutated = false;
         for module in env.get_modules() {
             if module.is_target() {
                 self.mutate_module(module)?;
+                let mm = env.get_extension::<MutationManager>();
+                mutated = match mm {
+                    Some(x) => x.mutated,
+                    None => false,
+                };
+                if mutated {
+                   break;
+                }
             }
         }
-        Ok(())
+        Ok(mutated)
     }
 
     fn mutate_module(&mut self, module: ModuleEnv<'_>) -> anyhow::Result<()> {
-        print!("mutating module {} ..", module.get_full_name_str());
+        print!("running module {} ..", module.get_full_name_str());
         std::io::stdout().flush()?;
 
         // Scope verification to the given module
@@ -166,25 +186,17 @@ impl Runner {
             VerificationScope::OnlyModule(module.get_full_name_str());
         ProverOptions::set(module.env, self.options.prover.clone());
 
-        // Run benchmark
-        let (duration, status) = self.mutate_module_duration(module.env)?;
-
-        // Write data record of benchmark result
-        writeln!(
-            self.out,
-            "{:<40} {:>12} {:>12}",
-            module.get_full_name_str(),
-            duration.as_millis(),
-            status
-        )?;
+        // Run (potentially) mutated module
+        let (duration, status) = self.run_mutated_module(module.env)?;
 
         println!("\x08\x08{:.3}s {}.", duration.as_secs_f64(), status);
         Ok(())
     }
 
-    fn mutate_module_duration(&mut self, env: &GlobalEnv) -> anyhow::Result<(Duration, String)> {
+    fn run_mutated_module(&mut self, env: &GlobalEnv) -> anyhow::Result<(Duration, String)> {
         // Create and process bytecode.
         let targets = create_and_process_bytecode(&self.options, env);
+
         check_errors(
             env,
             &self.options,
@@ -216,6 +228,7 @@ impl Runner {
             "ok"
         };
         env.clear_diag();
+
         Ok((now.elapsed(), status.to_string()))
     }
 }
