@@ -80,7 +80,6 @@ pub fn mutate(args: &[String]) {
     };
     let sources = get_vec("sources");
     let deps = get_vec("dependencies");
-
     let configs: Vec<Option<String>> = if matches.is_present("config") {
         get_vec("config").into_iter().map(Some).collect_vec()
     } else {
