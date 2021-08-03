@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     diag,
-    errors::diagnostic_codes::*,
+    diagnostics::codes::*,
     expansion::ast::{Fields, ModuleIdent, Value_},
     naming::ast::{self as N, TParam, TParamID, Type, TypeName_, Type_},
     parser::ast::{Ability_, BinOp_, ConstantName, Field, FunctionName, StructName, UnaryOp_, Var},
@@ -142,9 +142,7 @@ fn check_primitive_script_arg(
         result.is_ok()
     };
     if is_signer {
-        if !*seen_non_signer {
-            return;
-        } else {
+        if *seen_non_signer {
             let msg = mk_msg();
             let tmsg = format!(
                 "{}s must be a prefix of the arguments to a script--they must come before any \
@@ -154,8 +152,9 @@ fn check_primitive_script_arg(
             context
                 .env
                 .add_diag(diag!(TypeSafety::ScriptSignature, (mloc, msg), (loc, tmsg)));
-            return;
         }
+
+        return;
     } else {
         *seen_non_signer = true;
     }
@@ -269,7 +268,7 @@ fn function_body(
     };
     core::solve_constraints(context);
     expand::function_body_(context, &mut b_);
-    globals::function_body_(context, &acquires, &b_);
+    globals::function_body_(context, acquires, &b_);
     // freeze::function_body_(context, &mut b_);
     sp(loc, b_)
 }
@@ -328,7 +327,7 @@ mod check_valid_constant {
     use super::subtype_no_report;
     use crate::{
         diag,
-        errors::diagnostic_codes::DiagnosticCode,
+        diagnostics::codes::DiagnosticCode,
         naming::ast::{Type, Type_},
         shared::*,
         typing::{
@@ -625,8 +624,8 @@ fn check_phantom_params(
             }
         }
         Type_::Apply(_, n, ty_args) => match &n.value {
-            // Tuples cannot appear in structs, but we still report them as a non-phantom position in
-            // case they are ever allowed.
+            // Tuples cannot appear in structs, but we still report them as a non-phantom position
+            // for full information.
             TypeName_::Builtin(_) | TypeName_::Multiple(_) => {
                 for ty_arg in ty_args {
                     check_phantom_params(context, type_parameters, ty_arg, Some(TypeArg));
@@ -638,8 +637,8 @@ fn check_phantom_params(
                     .iter()
                     .map(|param| param.is_phantom)
                     .collect();
-                // Length of params and args may be different but we can still report errors
-                // for parameters with information
+                // Length of params and args may be different, but we can still report errors
+                // for parameters with information.
                 for (is_phantom, ty_arg) in param_is_phantom.into_iter().zip(ty_args) {
                     check_phantom_params(
                         context,
@@ -651,9 +650,9 @@ fn check_phantom_params(
             }
         },
         // References cannot appear in structs, but we still report them as a non-phantom position
-        // in case they are ever allowed.
+        // for full information.
         Type_::Ref(_, inner) => {
-            check_phantom_params(context, type_parameters, &inner, Some(TypeArg))
+            check_phantom_params(context, type_parameters, inner, Some(TypeArg))
         }
         Type_::Var(_) | Type_::Anything | Type_::Unit | Type_::UnresolvedError => {}
     }
@@ -668,7 +667,10 @@ fn invalid_phantom_use_error(
 ) {
     let msg = match non_phantom_pos {
         NonPhantomPos::FieldType => "Phantom type parameter cannot be used as a field type",
-        NonPhantomPos::TypeArg => "Phantom type parameter cannot be used as an argument to a parameter not declared as phantom",
+        NonPhantomPos::TypeArg => {
+            "Phantom type parameter cannot be used as an argument to a parameter not declared as \
+             phantom"
+        }
     };
     let decl_msg = format!("'{}' declared here as phantom", &param.user_specified_name);
     context.env.add_diag(diag!(
@@ -1435,7 +1437,7 @@ fn exp_inner(context: &mut Context, sp!(eloc, ne_): N::Exp) -> T::Exp {
             (sp(eloc, Type_::Unit), TE::Spec(u, used_local_types))
         }
         NE::UnresolvedError => {
-            assert!(context.env.has_errors());
+            assert!(context.env.has_diags());
             (context.error_type(eloc), TE::UnresolvedError)
         }
 
@@ -1810,7 +1812,7 @@ fn add_field_types<T>(
         }
     };
     for (_, f_, _) in &fields_ty {
-        if fields.get_(&f_).is_none() {
+        if fields.get_(f_).is_none() {
             let msg = format!("Missing {} for field '{}' in '{}::{}'", verb, f_, m, n);
             context
                 .env

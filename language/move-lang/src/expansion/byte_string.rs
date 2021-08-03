@@ -1,18 +1,18 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{diag, errors::new::Diagnostics, parser::syntax::make_loc};
+use crate::{diag, diagnostics::Diagnostics, parser::syntax::make_loc};
 use move_ir_types::location::*;
+use move_symbol_pool::Symbol;
 
-#[derive(Default)]
 struct Context {
-    filename: &'static str,
+    filename: Symbol,
     start_offset: usize,
     diags: Diagnostics,
 }
 
 impl Context {
-    fn new(filename: &'static str, start_offset: usize) -> Self {
+    fn new(filename: Symbol, start_offset: usize) -> Self {
         Self {
             filename,
             start_offset,
@@ -41,7 +41,7 @@ impl Context {
 
 pub fn decode(loc: Loc, text: &str) -> Result<Vec<u8>, Diagnostics> {
     let filename = loc.file();
-    let start_offset = loc.span().start().0 as usize;
+    let start_offset = loc.start() as usize;
     let mut context = Context::new(filename, start_offset);
     let mut buffer = vec![];
     let chars: Vec<_> = text.chars().collect();

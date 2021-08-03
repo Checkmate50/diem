@@ -29,7 +29,7 @@ pub fn function_body_(
     }
 
     for (annotated_acquire, annotated_loc) in annotated_acquires {
-        if !seen.contains_key(&annotated_acquire) {
+        if !seen.contains_key(annotated_acquire) {
             let msg = format!(
                 "Invalid 'acquires' list. The struct '{}::{}' was never acquired by '{}', '{}', \
                  '{}', or a transitive call",
@@ -268,14 +268,14 @@ where
         }
         T::Ref(_, _) | T::Unit => {
             // Key ability is checked by constraints, and these types do not have Key
-            assert!(context.env.has_errors());
+            assert!(context.env.has_diags());
             return None;
         }
         T::Apply(Some(abilities), sp!(_, TN::Multiple(_)), _)
         | T::Apply(Some(abilities), sp!(_, TN::Builtin(_)), _) => {
             // Key ability is checked by constraints
             assert!(!abilities.has_ability_(Ability_::Key));
-            assert!(context.env.has_errors());
+            assert!(context.env.has_diags());
             return None;
         }
         T::Param(_) => {

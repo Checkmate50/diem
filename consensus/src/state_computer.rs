@@ -1,7 +1,10 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{error::StateSyncError, state_replication::StateComputer};
+use crate::{
+    error::StateSyncError,
+    state_replication::{StateComputer, StateComputerCommitCallBackType},
+};
 use anyhow::Result;
 use consensus_types::{block::Block, executed_block::ExecutedBlock};
 use diem_crypto::HashValue;
@@ -66,6 +69,7 @@ impl StateComputer for ExecutionProxy {
         &self,
         blocks: &[Arc<ExecutedBlock>],
         finality_proof: LedgerInfoWithSignatures,
+        callback: StateComputerCommitCallBackType,
     ) -> Result<(), ExecutionError> {
         let mut block_ids = Vec::new();
         let mut txns = Vec::new();
@@ -80,7 +84,7 @@ impl StateComputer for ExecutionProxy {
         monitor!(
             "commit_block",
             self.execution_correctness_client
-                .commit_blocks(block_ids, finality_proof)?
+                .commit_blocks(block_ids, finality_proof.clone())?
         );
 
         if let Err(e) = monitor!(
@@ -89,6 +93,9 @@ impl StateComputer for ExecutionProxy {
         ) {
             error!(error = ?e, "Failed to notify state synchronizer");
         }
+
+        callback(blocks, finality_proof);
+
         Ok(())
     }
 

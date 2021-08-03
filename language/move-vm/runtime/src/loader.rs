@@ -70,9 +70,7 @@ where
     }
 
     fn get(&self, key: &K) -> Option<&Arc<V>> {
-        self.id_map
-            .get(&key)
-            .and_then(|idx| self.binaries.get(*idx))
+        self.id_map.get(key).and_then(|idx| self.binaries.get(*idx))
     }
 }
 
@@ -157,8 +155,8 @@ impl ModuleCache {
         id: ModuleId,
         module: CompiledModule,
     ) -> VMResult<Arc<Module>> {
-        if let Some(module) = self.module_at(&id) {
-            return Ok(module);
+        if let Some(cached) = self.module_at(&id) {
+            return Ok(cached);
         }
 
         // we need this operation to be transactional, if an error occurs we must
@@ -277,7 +275,7 @@ impl ModuleCache {
     ) -> PartialVMResult<Type> {
         let self_id = module.self_id();
         self.make_type_internal(
-            BinaryIndexedView::Module(&module),
+            BinaryIndexedView::Module(module),
             tok,
             &|struct_name, module_id| {
                 if module_id == &self_id {
@@ -364,6 +362,11 @@ impl ModuleCache {
             }
         };
         Ok(res)
+    }
+
+    // Given a module id, returns whether the module cache has the module or not
+    fn has_module(&self, module_id: &ModuleId) -> bool {
+        self.modules.id_map.contains_key(module_id)
     }
 
     // Given a ModuleId::struct_name, retrieve the `StructType` and the index associated.
@@ -487,7 +490,7 @@ impl Loader {
     fn deserialize_and_verify_script(
         &self,
         script: &[u8],
-        data_store: &mut impl DataStore,
+        data_store: &impl DataStore,
     ) -> VMResult<CompiledScript> {
         let script = match CompiledScript::deserialize(script) {
             Ok(script) => script,
@@ -503,9 +506,11 @@ impl Loader {
         match self.verify_script(&script) {
             Ok(_) => {
                 // verify dependencies
-                let deps = script.immediate_dependencies();
-                let loaded_deps =
-                    self.load_dependencies_verify_no_missing_dependencies(deps, data_store)?;
+                let loaded_deps = script
+                    .immediate_dependencies()
+                    .into_iter()
+                    .map(|module_id| self.load_module(&module_id, data_store))
+                    .collect::<VMResult<_>>()?;
                 self.verify_script_dependencies(&script, loaded_deps)?;
                 Ok(script)
             }
@@ -522,7 +527,7 @@ impl Loader {
     // Script verification steps.
     // See `verify_module()` for module verification steps.
     fn verify_script(&self, script: &CompiledScript) -> VMResult<()> {
-        bytecode_verifier::verify_script(&script)
+        bytecode_verifier::verify_script(script)
     }
 
     fn verify_script_dependencies(
@@ -550,9 +555,9 @@ impl Loader {
         module_id: &ModuleId,
         ty_args: &[TypeTag],
         is_script_execution: bool,
-        data_store: &mut impl DataStore,
+        data_store: &impl DataStore,
     ) -> VMResult<(Arc<Function>, Vec<Type>, Vec<Type>, Vec<Type>)> {
-        let module = self.load_module_verify_not_missing(module_id, data_store)?;
+        let module = self.load_module(module_id, data_store)?;
         let idx = self
             .module_cache
             .read()
@@ -616,7 +621,7 @@ impl Loader {
             bundle_unverified.remove(&module_id);
 
             self.verify_module_for_publication(
-                &module,
+                module,
                 &bundle_verified,
                 &bundle_unverified,
                 data_store,
@@ -627,6 +632,7 @@ impl Loader {
     }
 
     // A module to be published must be loadable.
+    //
     // This step performs all verification steps to load the module without loading it.
     // The module is not added to the code cache. It is simply published to the data cache.
     // See `verify_script()` for script verification steps.
@@ -641,75 +647,45 @@ impl Loader {
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
-        data_store: &mut impl DataStore,
+        data_store: &impl DataStore,
     ) -> VMResult<()> {
         // Performs all verification steps to load the module without loading it, i.e., the new
         // module will NOT show up in `module_cache`. In the module republishing case, it means
         // that the old module is still in the `module_cache`, unless a new Loader is created,
         // which means that a new MoveVM instance needs to be created.
+        bytecode_verifier::verify_module(module)?;
+        self.check_natives(module)?;
 
-        self.verify_module_verify_no_missing_dependencies(module, bundle_verified, data_store)?;
+        let mut visited = BTreeSet::new();
+        let mut friends_discovered = BTreeSet::new();
+        visited.insert(module.self_id());
+        friends_discovered.extend(module.immediate_friends());
 
-        // friendship is an upward edge in the dependencies DAG, so for modules that are in the
-        // unverified portion of the bundle, their linking check is deferred after the current
-        // module is verified.
-        let cached_friends = module
-            .immediate_friends()
-            .into_iter()
-            .filter(|module_id| !bundle_unverified.contains(module_id))
-            .collect();
-        self.load_dependencies_verify_no_missing_dependencies(cached_friends, data_store)?;
+        // downward exploration of the module's dependency graph. Since we know nothing about this
+        // target module, we don't know what the module may specify as its dependencies and hence,
+        // we allow the loading of dependencies and the subsequent linking to fail.
+        self.load_and_verify_dependencies(
+            module,
+            bundle_verified,
+            data_store,
+            &mut visited,
+            &mut friends_discovered,
+            /* allow_dependency_loading_failure */ true,
+        )?;
+
+        // upward exploration of the modules's dependency graph. Similar to dependency loading, as
+        // we know nothing about this target module, we don't know what the module may specify as
+        // its friends and hence, we allow the loading of friends to fail.
+        self.load_and_verify_friends(
+            friends_discovered,
+            bundle_verified,
+            bundle_unverified,
+            data_store,
+            /* allow_friend_loading_failure */ true,
+        )?;
+
+        // make sure there is no cyclic dependency
         self.verify_module_cyclic_relations(module, bundle_verified, bundle_unverified)
-    }
-
-    fn verify_module_verify_no_missing_dependencies(
-        &self,
-        module: &CompiledModule,
-        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
-        data_store: &mut impl DataStore,
-    ) -> VMResult<()> {
-        self.verify_module(module, bundle_verified, data_store, true)
-    }
-
-    fn verify_module_expect_no_missing_dependencies(
-        &self,
-        module: &CompiledModule,
-        data_store: &mut impl DataStore,
-    ) -> VMResult<()> {
-        self.verify_module(module, &BTreeMap::new(), data_store, false)
-    }
-
-    fn verify_module(
-        &self,
-        module: &CompiledModule,
-        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
-        data_store: &mut impl DataStore,
-        verify_no_missing_modules: bool,
-    ) -> VMResult<()> {
-        bytecode_verifier::verify_module(&module)?;
-        self.check_natives(&module)?;
-
-        // All immediate dependencies of the module being verified should be either in the code
-        // cache or in the verified portion of the bundle (e.g., verified before this module).
-        let mut bundle_deps = vec![];
-        let mut cached_deps = vec![];
-        for module_id in module.immediate_dependencies() {
-            match bundle_verified.get(&module_id) {
-                None => cached_deps.push(module_id),
-                Some(module) => bundle_deps.push(module),
-            }
-        }
-
-        let loaded_imm_deps = if verify_no_missing_modules {
-            self.load_dependencies_verify_no_missing_dependencies(cached_deps, data_store)?
-        } else {
-            self.load_dependencies_expect_no_missing_dependencies(cached_deps, data_store)?
-        };
-        let all_imm_deps = loaded_imm_deps
-            .iter()
-            .map(|module| module.module())
-            .chain(bundle_deps.into_iter());
-        dependencies::verify_module(module, all_imm_deps)
     }
 
     fn verify_module_cyclic_relations(
@@ -793,7 +769,7 @@ impl Loader {
     // Helpers for loading and verification
     //
 
-    fn load_type(&self, type_tag: &TypeTag, data_store: &mut impl DataStore) -> VMResult<Type> {
+    fn load_type(&self, type_tag: &TypeTag, data_store: &impl DataStore) -> VMResult<Type> {
         Ok(match type_tag {
             TypeTag::Bool => Type::Bool,
             TypeTag::U8 => Type::U8,
@@ -804,7 +780,7 @@ impl Loader {
             TypeTag::Vector(tt) => Type::Vector(Box::new(self.load_type(tt, data_store)?)),
             TypeTag::Struct(struct_tag) => {
                 let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
-                self.load_module_verify_not_missing(&module_id, data_store)?;
+                self.load_module(&module_id, data_store)?;
                 let (idx, struct_type) = self
                     .module_cache
                     .read()
@@ -826,115 +802,258 @@ impl Loader {
         })
     }
 
-    // The process of loading is recursive, and module are cached by the loader as soon as
-    // they are verifiable (including dependencies).
-    // Effectively that means modules are cached from leaf to root in the dependency DAG.
-    // If a dependency error is found, loading stops and the error is returned.
-    // However all modules cached up to that point stay loaded.
-    // In principle that is not the safest model but it is justified
-    // by the fact that publishing is limited, and complex/tricky dependencies error
-    // are difficult or impossible to accomplish in reality.
-
-    // The process of deserialization and verification is not and it must not be under lock.
-    // So when publishing modules through the dependency DAG it may happen that a different
-    // thread had loaded the module after this process fetched it from storage.
-    // Caching will take care of that by asking for each dependency module again under lock.
-    fn load_module(
+    // The interface for module loading. Aligned with `load_type` and `load_function`, this function
+    // verifies that the module is OK instead of expect it.
+    pub(crate) fn load_module(
         &self,
         id: &ModuleId,
-        data_store: &mut impl DataStore,
-        verify_module_is_not_missing: bool,
+        data_store: &impl DataStore,
     ) -> VMResult<Arc<Module>> {
-        // kept private to `load_module` to prevent verification errors from leaking
-        // and not being marked as invariant violations
-        fn deserialize_and_verify_module(
-            loader: &Loader,
-            id: &ModuleId,
-            bytes: Vec<u8>,
-            data_store: &mut impl DataStore,
-        ) -> VMResult<CompiledModule> {
-            let module = CompiledModule::deserialize(&bytes).map_err(|err| {
-                error!("[VM] deserializer for module returned error: {:?}", err);
-                let msg = format!("Deserialization error: {:?}", err);
-                PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
-                    .with_message(msg)
-                    .finish(Location::Module(id.clone()))
-            })?;
-            loader.verify_module_expect_no_missing_dependencies(&module, data_store)?;
-            Ok(module)
+        self.load_module_internal(id, &BTreeMap::new(), &BTreeSet::new(), data_store)
+    }
+
+    // Load the transitive closure of the target module first, and then verify that the modules in
+    // the closure do not have cyclic dependencies.
+    fn load_module_internal(
+        &self,
+        id: &ModuleId,
+        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
+        bundle_unverified: &BTreeSet<ModuleId>,
+        data_store: &impl DataStore,
+    ) -> VMResult<Arc<Module>> {
+        // if the module is already in the code cache, load the cached version
+        if let Some(cached) = self.module_cache.read().module_at(id) {
+            return Ok(cached);
         }
 
-        if let Some(module) = self.module_cache.read().module_at(id) {
-            return Ok(module);
-        }
+        // otherwise, load the transitive closure of the target module
+        let module_ref = self.load_and_verify_module_and_dependencies_and_friends(
+            id,
+            bundle_verified,
+            bundle_unverified,
+            data_store,
+            /* allow_module_loading_failure */ true,
+        )?;
 
+        // verify that the transitive closure does not have cycles
+        self.verify_module_cyclic_relations(
+            module_ref.module(),
+            bundle_verified,
+            bundle_unverified,
+        )
+        .map_err(expect_no_verification_errors)?;
+        Ok(module_ref)
+    }
+
+    // Load, deserialize, and check the module with the bytecode verifier, without linking
+    fn load_and_verify_module(
+        &self,
+        id: &ModuleId,
+        data_store: &impl DataStore,
+        allow_loading_failure: bool,
+    ) -> VMResult<CompiledModule> {
+        // bytes fetching, allow loading to fail if the flag is set
         let bytes = match data_store.load_module(id) {
             Ok(bytes) => bytes,
-            Err(err) if verify_module_is_not_missing => return Err(err),
+            Err(err) if allow_loading_failure => return Err(err),
             Err(err) => {
                 error!("[VM] Error fetching module with id {:?}", id);
                 return Err(expect_no_verification_errors(err));
             }
         };
 
-        let module = deserialize_and_verify_module(self, id, bytes, data_store)
+        // for bytes obtained from the data store, they should always deserialize and verify.
+        // It is an invariant violation if they don't.
+        let module = CompiledModule::deserialize(&bytes)
+            .map_err(|err| {
+                let msg = format!("Deserialization error: {:?}", err);
+                PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
+                    .with_message(msg)
+                    .finish(Location::Module(id.clone()))
+            })
             .map_err(expect_no_verification_errors)?;
-        let module_ref = self
-            .module_cache
-            .write()
-            .insert(&self.natives, id.clone(), module)?;
 
-        // friendship is an upward edge in the dependencies DAG, so it has to be checked after the
-        // module is put into cache, otherwise it is a chicken-and-egg problem.
-        let friends = module_ref.module().immediate_friends();
-        self.load_dependencies_expect_no_missing_dependencies(friends, data_store)?;
-        self.verify_module_cyclic_relations(
-            module_ref.module(),
-            &BTreeMap::new(),
-            &BTreeSet::new(),
+        // bytecode verifier checks that can be performed with the module itself
+        bytecode_verifier::verify_module(&module).map_err(expect_no_verification_errors)?;
+        self.check_natives(&module)
+            .map_err(expect_no_verification_errors)?;
+        Ok(module)
+    }
+
+    // Everything in `load_and_verify_module` and also recursively load and verify all the
+    // dependencies of the target module.
+    fn load_and_verify_module_and_dependencies(
+        &self,
+        id: &ModuleId,
+        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
+        data_store: &impl DataStore,
+        visited: &mut BTreeSet<ModuleId>,
+        friends_discovered: &mut BTreeSet<ModuleId>,
+        allow_module_loading_failure: bool,
+    ) -> VMResult<Arc<Module>> {
+        // dependency loading does not permit cycles
+        if visited.contains(id) {
+            return Err(PartialVMError::new(StatusCode::CYCLIC_MODULE_DEPENDENCY)
+                .finish(Location::Undefined));
+        }
+
+        // module self-check
+        let module = self.load_and_verify_module(id, data_store, allow_module_loading_failure)?;
+        visited.insert(id.clone());
+        friends_discovered.extend(module.immediate_friends());
+
+        // downward exploration of the module's dependency graph. For a module that is loaded from
+        // the data_store, we should never allow its dependencies to fail to load.
+        self.load_and_verify_dependencies(
+            &module,
+            bundle_verified,
+            data_store,
+            visited,
+            friends_discovered,
+            /* allow_dependency_loading_failure */ false,
         )?;
+
+        // if linking goes well, insert the module to the code cache
+        let mut locked_cache = self.module_cache.write();
+        let module_ref = locked_cache.insert(&self.natives, id.clone(), module)?;
+        drop(locked_cache); // explicit unlock
 
         Ok(module_ref)
     }
 
-    // Returns a verifier error if the module does not exist
-    fn load_module_verify_not_missing(
+    // downward exploration of the module's dependency graph
+    fn load_and_verify_dependencies(
+        &self,
+        module: &CompiledModule,
+        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
+        data_store: &impl DataStore,
+        visited: &mut BTreeSet<ModuleId>,
+        friends_discovered: &mut BTreeSet<ModuleId>,
+        allow_dependency_loading_failure: bool,
+    ) -> VMResult<()> {
+        // all immediate dependencies of the module being verified should be in one of the locations
+        // - the verified portion of the bundle (e.g., verified before this module)
+        // - the code cache (i.e., loaded already)
+        // - the data store (i.e., not loaded to code cache yet)
+        let mut bundle_deps = vec![];
+        let mut cached_deps = vec![];
+        for module_id in module.immediate_dependencies() {
+            if let Some(cached) = bundle_verified.get(&module_id) {
+                bundle_deps.push(cached);
+            } else {
+                let locked_cache = self.module_cache.read();
+                let loaded = match locked_cache.module_at(&module_id) {
+                    None => {
+                        drop(locked_cache); // explicit unlock
+                        self.load_and_verify_module_and_dependencies(
+                            &module_id,
+                            bundle_verified,
+                            data_store,
+                            visited,
+                            friends_discovered,
+                            allow_dependency_loading_failure,
+                        )?
+                    }
+                    Some(cached) => cached,
+                };
+                cached_deps.push(loaded);
+            }
+        }
+
+        // once all dependencies are loaded, do the linking check
+        let all_imm_deps = bundle_deps
+            .into_iter()
+            .chain(cached_deps.iter().map(|m| m.module()));
+        let result = dependencies::verify_module(module, all_imm_deps);
+
+        // if dependencies loading is not allowed to fail, the linking should not fail as well
+        if allow_dependency_loading_failure {
+            result
+        } else {
+            result.map_err(expect_no_verification_errors)
+        }
+    }
+
+    // Everything in `load_and_verify_module_and_dependencies` and also recursively load and verify
+    // all the friends modules of the newly loaded modules, until the friends frontier covers the
+    // whole closure.
+    fn load_and_verify_module_and_dependencies_and_friends(
         &self,
         id: &ModuleId,
-        data_store: &mut impl DataStore,
+        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
+        bundle_unverified: &BTreeSet<ModuleId>,
+        data_store: &impl DataStore,
+        allow_module_loading_failure: bool,
     ) -> VMResult<Arc<Module>> {
-        self.load_module(id, data_store, true)
+        // load the closure of the module in terms of dependency relation
+        let mut visited = BTreeSet::new();
+        let mut friends_discovered = BTreeSet::new();
+        let module_ref = self.load_and_verify_module_and_dependencies(
+            id,
+            bundle_verified,
+            data_store,
+            &mut visited,
+            &mut friends_discovered,
+            allow_module_loading_failure,
+        )?;
+
+        // upward exploration of the module's friendship graph and expand the friendship frontier.
+        // For a module that is loaded from the data_store, we should never allow that its friends
+        // fail to load.
+        self.load_and_verify_friends(
+            friends_discovered,
+            bundle_verified,
+            bundle_unverified,
+            data_store,
+            /* allow_friend_loading_failure */ false,
+        )?;
+        Ok(module_ref)
     }
 
-    // Expects all modules to be on chain. Gives an invariant violation if it is not found
-    pub(crate) fn load_module_expect_not_missing(
+    // upward exploration of the module's dependency graph
+    fn load_and_verify_friends(
         &self,
-        id: &ModuleId,
-        data_store: &mut impl DataStore,
-    ) -> VMResult<Arc<Module>> {
-        self.load_module(id, data_store, false)
-    }
+        friends_discovered: BTreeSet<ModuleId>,
+        bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
+        bundle_unverified: &BTreeSet<ModuleId>,
+        data_store: &impl DataStore,
+        allow_friend_loading_failure: bool,
+    ) -> VMResult<()> {
+        // for each new module discovered in the frontier, load them fully and expand the frontier.
+        // apply three filters to the new friend modules discovered
+        // - `!locked_cache.has_module(mid)`
+        //   If we friend a module that is already in the code cache, then we know that the
+        //   transitive closure of that module is loaded into the cache already, skip the loading
+        // - `!bundle_verified.contains_key(mid)`
+        //   In the case of publishing a bundle, we don't actually put the published module into
+        //   code cache. This `bundle_verified` cache is a temporary extension of the code cache
+        //   in the bundle publication scenario. If a module is already verified, we don't need to
+        //   re-load it again.
+        // - `!bundle_unverified.contains(mid)
+        //   If the module under verification declares a friend which is also in the bundle (and
+        //   positioned after this module in the bundle), we defer the loading of that module when
+        //   it is the module's turn in the bundle.
+        let locked_cache = self.module_cache.read();
+        let new_imm_friends: Vec<_> = friends_discovered
+            .into_iter()
+            .filter(|mid| {
+                !locked_cache.has_module(mid)
+                    && !bundle_verified.contains_key(mid)
+                    && !bundle_unverified.contains(mid)
+            })
+            .collect();
+        drop(locked_cache); // explicit unlock
 
-    // Returns a verifier error if the module does not exist
-    fn load_dependencies_verify_no_missing_dependencies(
-        &self,
-        deps: Vec<ModuleId>,
-        data_store: &mut impl DataStore,
-    ) -> VMResult<Vec<Arc<Module>>> {
-        deps.into_iter()
-            .map(|dep| self.load_module_verify_not_missing(&dep, data_store))
-            .collect()
-    }
-
-    // Expects all modules to be on chain. Gives an invariant violation if it is not found
-    fn load_dependencies_expect_no_missing_dependencies(
-        &self,
-        deps: Vec<ModuleId>,
-        data_store: &mut impl DataStore,
-    ) -> VMResult<Vec<Arc<Module>>> {
-        deps.into_iter()
-            .map(|dep| self.load_module_expect_not_missing(&dep, data_store))
-            .collect()
+        for module_id in new_imm_friends {
+            self.load_and_verify_module_and_dependencies_and_friends(
+                &module_id,
+                bundle_verified,
+                bundle_unverified,
+                data_store,
+                allow_friend_loading_failure,
+            )?;
+        }
+        Ok(())
     }
 
     // Verify the kind (constraints) of an instantiation.
@@ -1182,7 +1301,7 @@ impl<'a> Resolver<'a> {
     }
 
     pub(crate) fn loader(&self) -> &Loader {
-        &self.loader
+        self.loader
     }
 }
 
@@ -1917,5 +2036,18 @@ impl Loader {
     }
     pub(crate) fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
         self.type_to_type_layout_impl(ty, 1)
+    }
+}
+
+// Public APIs for external uses.
+impl Loader {
+    pub(crate) fn get_type_layout(
+        &self,
+        type_tag: &TypeTag,
+        move_storage: &impl DataStore,
+    ) -> VMResult<MoveTypeLayout> {
+        let ty = self.load_type(type_tag, move_storage)?;
+        self.type_to_type_layout(&ty)
+            .map_err(|e| e.finish(Location::Undefined))
     }
 }

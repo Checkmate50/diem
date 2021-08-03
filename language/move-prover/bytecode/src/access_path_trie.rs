@@ -69,7 +69,7 @@ impl<T: FootprintDomain> TrieNode<T> {
         }
     }
 
-    /// Like join, but gracefully handles `Non` data fields by treating None as Bottom
+    /// Like join, but gracefully handles `None` data fields by treating None as Bottom
     pub fn join_data_opt(&mut self, other: &Option<T>) -> JoinResult {
         Self::join_data_opt_(&mut self.data, other)
     }
@@ -77,15 +77,13 @@ impl<T: FootprintDomain> TrieNode<T> {
     pub fn join_child_data(&self, mut acc: Option<T>) -> Option<T> {
         Self::join_data_opt_(&mut acc, &self.data);
         for v in self.children.values() {
-            Self::join_data_opt_(&mut acc, &v.data);
+            acc = v.join_child_data(acc)
         }
         acc
     }
 
     pub fn get_child_data(&self) -> Option<T> {
-        let mut acc = None;
-        Self::join_data_opt_(&mut acc, &self.data);
-        acc
+        self.join_child_data(None)
     }
 
     pub fn data(&self) -> &Option<T> {
@@ -236,7 +234,7 @@ impl<T: FootprintDomain> AccessPathTrie<T> {
             match (*data1_opt, data2_opt) {
                 (Some(data1), Some(data2)) => {
                     let mut new_data = data1.clone();
-                    new_data.join(&data2);
+                    new_data.join(data2);
                     self.update_access_path_weak(ap.clone(), Some(new_data));
                 }
                 (None, Some(data)) | (Some(data), None) => {

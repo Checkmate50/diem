@@ -429,7 +429,7 @@ impl<'env> FunctionTranslator<'env> {
                     VerificationFlavor::Instantiated(_) => {
                         format!("$verify_{}", flavor)
                     }
-                    VerificationFlavor::Inconsistency => {
+                    VerificationFlavor::Inconsistency(_) => {
                         attribs.push(format!(
                             "{{:msg_if_verifies \"inconsistency_detected{}\"}} ",
                             self.loc_str(&fun_target.get_loc())
@@ -520,7 +520,12 @@ impl<'env> FunctionTranslator<'env> {
             };
             emitln!(writer, "// function instantiation");
             for (ty_var, ty_inst) in instantiation {
-                emitln!(writer, "#{} := {}", ty_var, ty_inst.display(&display_ctxt));
+                emitln!(
+                    writer,
+                    "// #{} := {};",
+                    ty_var,
+                    ty_inst.display(&display_ctxt)
+                );
             }
             emitln!(writer, "");
         }
@@ -543,16 +548,18 @@ impl<'env> FunctionTranslator<'env> {
             );
         }
         // Generate declarations for modifies condition.
+        let mut mem_inst_seen = BTreeSet::new();
         for qid in fun_target.get_modify_ids() {
-            emitln!(
-                writer,
-                "var {}: {}",
-                boogie_modifies_memory_name(
-                    fun_target.global_env(),
-                    &qid.instantiate(self.type_inst)
-                ),
-                "[int]bool;"
-            );
+            let memory = qid.instantiate(self.type_inst);
+            if !mem_inst_seen.contains(&memory) {
+                emitln!(
+                    writer,
+                    "var {}: {}",
+                    boogie_modifies_memory_name(fun_target.global_env(), &memory),
+                    "[int]bool;"
+                );
+                mem_inst_seen.insert(memory);
+            }
         }
 
         // Declare temporaries for debug tracing and other purposes.
@@ -718,6 +725,7 @@ impl<'env> FunctionTranslator<'env> {
         // Translate the bytecode instruction.
         match bytecode {
             SaveMem(_, label, mem) => {
+                let mem = &mem.to_owned().instantiate(self.type_inst);
                 let snapshot = boogie_resource_memory_name(env, mem, &Some(*label));
                 let current = boogie_resource_memory_name(env, mem, &None);
                 emitln!(writer, "{} := {};", snapshot, current);
@@ -1623,7 +1631,7 @@ impl<'env> FunctionTranslator<'env> {
             emitln!(
                 self.parent.writer,
                 "assume {{:print \"$at{}\"}} true;",
-                self.loc_str(&loc)
+                self.loc_str(loc)
             );
         }
     }

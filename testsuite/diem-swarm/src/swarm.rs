@@ -24,6 +24,7 @@ use std::{
     env,
     fs::File,
     io::{self, Read},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Child, Command},
     str::FromStr,
@@ -459,7 +460,7 @@ impl DiemSwarm {
     /// The directory for the last failed attempt won't be removed.
     fn setup_config_dir(config_dir: &Option<String>) -> DiemSwarmDir {
         if let Some(dir_str) = config_dir {
-            let path_buf = PathBuf::from_str(&dir_str).expect("unable to create config dir");
+            let path_buf = PathBuf::from_str(dir_str).expect("unable to create config dir");
             if path_buf.exists() {
                 std::fs::remove_dir_all(dir_str).expect("unable to delete previous config dir");
             }
@@ -528,7 +529,7 @@ impl DiemSwarm {
             &config_path,
             diem_framework_releases::current_module_blobs().to_vec(),
         )
-        .num_validators(num_nodes)
+        .num_validators(NonZeroUsize::new(num_nodes).unwrap())
         .template(node_config);
         let config = SwarmConfig::build(&builder, config_path)?;
 
@@ -575,7 +576,7 @@ impl DiemSwarm {
                 &self.diem_node_bin_path,
                 node_id.clone(),
                 self.node_type,
-                &path,
+                path,
                 logs_dir_path.join(format!("{}.log", index)),
             )
             .unwrap();

@@ -25,12 +25,20 @@ impl<T: TName> UniqueSet<T> {
         self.0.add(x, ())
     }
 
+    pub fn remove(&mut self, x: &T) -> bool {
+        self.0.remove(x).is_some()
+    }
+
+    pub fn remove_(&mut self, x: &T::Key) -> bool {
+        self.0.remove_(x).is_some()
+    }
+
     pub fn contains(&self, x: &T) -> bool {
         self.0.contains_key(x)
     }
 
     pub fn contains_(&self, x_: &T::Key) -> bool {
-        self.0.contains_key_(&x_)
+        self.0.contains_key_(x_)
     }
 
     pub fn get_loc(&self, x: &T) -> Option<&T::Loc> {

@@ -3,6 +3,7 @@
 
 use crate::shared::{ast_debug::*, AddressBytes, Identifier, Name, TName, ADDRESS_LENGTH};
 use move_ir_types::location::*;
+use move_symbol_pool::Symbol;
 use std::{fmt, hash::Hash};
 
 macro_rules! new_name {
@@ -331,6 +332,7 @@ pub type SpecApplyFragment = Spanned<SpecApplyFragment_>;
 pub enum SpecBlockMember_ {
     Condition {
         kind: SpecConditionKind,
+        type_parameters: Vec<(Name, Vec<Ability>)>,
         properties: Vec<PragmaProperty>,
         exp: Exp,
         additional_exps: Vec<Exp>,
@@ -696,7 +698,7 @@ impl LeadingNameAccess_ {
 }
 
 impl Definition {
-    pub fn file(&self) -> &'static str {
+    pub fn file(&self) -> Symbol {
         match self {
             Definition::Module(m) => m.loc.file(),
             Definition::Address(a) => a.loc.file(),
@@ -1247,11 +1249,13 @@ impl AstDebug for SpecBlockMember_ {
         match self {
             SpecBlockMember_::Condition {
                 kind,
+                type_parameters,
                 properties: _,
                 exp,
                 additional_exps,
             } => {
                 kind.ast_debug(w);
+                type_parameters.ast_debug(w);
                 exp.ast_debug(w);
                 w.list(additional_exps, ",", |w, e| {
                     e.ast_debug(w);
@@ -1488,7 +1492,7 @@ impl AstDebug for StructTypeParameter {
             w.write("phantom ");
         }
         w.write(&name.value);
-        ability_constraints_ast_debug(w, &constraints);
+        ability_constraints_ast_debug(w, constraints);
     }
 }
 

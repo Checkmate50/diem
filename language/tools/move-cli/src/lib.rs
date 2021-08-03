@@ -31,7 +31,7 @@ use move_core_types::{
 use move_vm_runtime::native_functions::NativeFunction;
 use sandbox::utils::mode::{Mode, ModeType};
 use std::{fs, path::Path};
-use structopt::StructOpt;
+use structopt::{clap::arg_enum, StructOpt};
 
 type NativeFunctionRecord = (AccountAddress, Identifier, Identifier, NativeFunction);
 
@@ -223,9 +223,25 @@ pub enum ExperimentalCommand {
         args: Vec<TransactionArgument>,
         #[structopt(long = "type-args", parse(try_from_str = parser::parse_type_tag))]
         type_args: Vec<TypeTag>,
-        #[structopt(long = "concretize")]
-        concretize: bool,
+        #[structopt(long = "concretize", possible_values = &ConcretizeMode::variants(), case_insensitive = true, default_value = "dont")]
+        concretize: ConcretizeMode,
     },
+}
+
+// Specify if/how the analysis should concretize and filter the static analysis summary
+arg_enum! {
+    // Specify if/how the analysis should concretize and filter the static analysis summary
+    #[derive(Debug, Clone, Copy)]
+    pub enum ConcretizeMode {
+        // Show the full concretized access paths read or written (e.g. 0xA/0x1::M::S/f/g)
+        Paths,
+        // Show only the concrete resource keys that are read (e.g. 0xA/0x1::M::S)
+        Reads,
+        // Show only the concrete resource keys that are written (e.g. 0xA/0x1::M::S)
+        Writes,
+        // Do not concretize; show the results from the static analysis
+        Dont,
+    }
 }
 
 fn handle_experimental_commands(
@@ -375,7 +391,7 @@ pub fn run_cli(
                 base::commands::check(
                     &[mode_interface_dir],
                     false,
-                    &source_files,
+                    source_files,
                     move_args.verbose,
                 )
             } else {
@@ -383,16 +399,16 @@ pub fn run_cli(
                     &[mode_interface_dir],
                     &move_args.build_dir,
                     false,
-                    &source_files,
+                    source_files,
                     !*no_source_maps,
                     move_args.verbose,
                 )
             }
         }
         Command::Sandbox { cmd } => {
-            handle_sandbox_commands(natives, error_descriptions, &move_args, &mode, cmd)
+            handle_sandbox_commands(natives, error_descriptions, move_args, &mode, cmd)
         }
-        Command::Experimental { cmd } => handle_experimental_commands(&move_args, &mode, cmd),
+        Command::Experimental { cmd } => handle_experimental_commands(move_args, &mode, cmd),
     }
 }
 

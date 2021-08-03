@@ -12,6 +12,7 @@ use move_command_line_common::files::{
     MOVE_COMPILED_EXTENSION, MOVE_IR_EXTENSION, SOURCE_MAP_EXTENSION,
 };
 use move_core_types::account_address::AccountAddress;
+use move_symbol_pool::Symbol;
 use std::{
     fs,
     io::Write,
@@ -63,7 +64,7 @@ fn write_output(path: &Path, buf: &[u8]) {
     let mut f = fs::File::create(path)
         .with_context(|| format!("Unable to open output file {:?}", path))
         .unwrap();
-    f.write_all(&buf)
+    f.write_all(buf)
         .with_context(|| format!("Unable to write to output file {:?}", path))
         .unwrap();
 }
@@ -93,7 +94,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let file_name = args.source_path.as_path().as_os_str().to_str().unwrap();
+    let file_name = Symbol::from(args.source_path.as_path().as_os_str().to_str().unwrap());
 
     if args.list_dependencies {
         let source = fs::read_to_string(args.source_path.clone()).expect("Unable to read file");

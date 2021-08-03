@@ -26,8 +26,11 @@ use move_lang::{
     shared::Flags,
     unit_test::{ExpectedFailure, ModuleTestPlan, TestCase, TestPlan},
 };
-use move_model::{model::GlobalEnv, run_model_builder_with_compilation_flags};
-use move_vm_runtime::move_vm::MoveVM;
+use move_model::{
+    model::GlobalEnv, options::ModelBuilderOptions,
+    run_model_builder_with_options_and_compilation_flags,
+};
+use move_vm_runtime::{move_vm::MoveVM, native_functions::NativeFunctionTable};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas_schedule::{zero_cost_schedule, GasStatus};
 use rayon::prelude::*;
@@ -35,18 +38,17 @@ use resource_viewer::MoveValueAnnotator;
 use std::{io::Write, marker::Send, sync::Mutex, time::Instant};
 
 /// Test state common to all tests
-#[derive(Debug)]
 pub struct SharedTestingConfig {
     save_storage_state_on_failure: bool,
     execution_bound: u64,
     cost_table: CostTable,
+    native_function_table: NativeFunctionTable,
     starting_storage_state: InMemoryStorage,
     source_files: Vec<String>,
     check_stackless_vm: bool,
     verbose: bool,
 }
 
-#[derive(Debug)]
 pub struct TestRunner {
     num_threads: usize,
     testing_config: SharedTestingConfig,
@@ -116,6 +118,7 @@ impl TestRunner {
         verbose: bool,
         save_storage_state_on_failure: bool,
         tests: TestPlan,
+        native_function_table: Option<NativeFunctionTable>,
     ) -> Result<Self> {
         let source_files = tests
             .files
@@ -124,11 +127,15 @@ impl TestRunner {
             .collect();
         let modules = tests.module_info.values().map(|info| &info.0);
         let starting_storage_state = setup_test_storage(modules)?;
+        let native_function_table = native_function_table.unwrap_or_else(|| {
+            move_stdlib::natives::all_natives(AccountAddress::from_hex_literal("0x1").unwrap())
+        });
         Ok(Self {
             testing_config: SharedTestingConfig {
                 save_storage_state_on_failure,
                 starting_storage_state,
                 execution_bound,
+                native_function_table,
                 cost_table: unit_cost_table(),
                 source_files,
                 check_stackless_vm,
@@ -178,10 +185,7 @@ impl SharedTestingConfig {
         function_name: &str,
         test_info: &TestCase,
     ) -> (VMResult<ChangeSet>, VMResult<Vec<Vec<u8>>>, TestRunInfo) {
-        let move_vm = MoveVM::new(move_stdlib::natives::all_natives(
-            AccountAddress::from_hex_literal("0x1").unwrap(),
-        ))
-        .unwrap();
+        let move_vm = MoveVM::new(self.native_function_table.clone()).unwrap();
         let mut session = move_vm.new_session(&self.starting_storage_state);
         let mut gas_meter = GasStatus::new(&self.cost_table, GasUnits::new(self.execution_bound));
         // TODO: collect VM logs if the verbose flag (i.e, `self.verbose`) is set
@@ -189,7 +193,7 @@ impl SharedTestingConfig {
         let now = Instant::now();
         let return_result = session.execute_function(
             &test_plan.module_id,
-            &IdentStr::new(function_name).unwrap(),
+            IdentStr::new(function_name).unwrap(),
             vec![], // no ty args, at least for now
             serialize_values(test_info.arguments.iter()),
             &mut gas_meter,
@@ -233,7 +237,7 @@ impl SharedTestingConfig {
         let global_state = GlobalState::default();
         let (return_result, change_set, _) = interpreter.interpret(
             &test_plan.module_id,
-            &IdentStr::new(function_name).unwrap(),
+            IdentStr::new(function_name).unwrap(),
             &[], // no ty args, at least for now
             &test_info.arguments,
             &global_state,
@@ -293,9 +297,13 @@ impl SharedTestingConfig {
         };
 
         let stackless_model = if self.check_stackless_vm {
-            let model =
-                run_model_builder_with_compilation_flags(&self.source_files, &[], Flags::testing())
-                    .unwrap_or_else(|e| panic!("Unable to build stackless bytecode: {}", e));
+            let model = run_model_builder_with_options_and_compilation_flags(
+                &self.source_files,
+                &[],
+                ModelBuilderOptions::default(),
+                Flags::testing(),
+            )
+            .unwrap_or_else(|e| panic!("Unable to build stackless bytecode: {}", e));
             Some(model)
         } else {
             None
@@ -331,7 +339,7 @@ impl SharedTestingConfig {
                             None,
                             None,
                         ),
-                        &test_plan,
+                        test_plan,
                     );
                     continue;
                 }
@@ -344,7 +352,7 @@ impl SharedTestingConfig {
                             None,
                             None,
                         ),
-                        &test_plan,
+                        test_plan,
                     );
                     continue;
                 }
@@ -371,7 +379,7 @@ impl SharedTestingConfig {
                                 Some(err),
                                 save_session_state(),
                             ),
-                            &test_plan,
+                            test_plan,
                         )
                     }
                     // Expected the test to not abort, but it aborted with `code`
@@ -384,7 +392,7 @@ impl SharedTestingConfig {
                                 Some(err),
                                 save_session_state(),
                             ),
-                            &test_plan,
+                            test_plan,
                         )
                     }
                     // Expected the test the abort with a specific `code`, and it did abort with
@@ -393,7 +401,7 @@ impl SharedTestingConfig {
                         if err.major_status() == StatusCode::ABORTED && *code == other_code =>
                     {
                         pass(function_name);
-                        stats.test_success(test_run_info, &test_plan);
+                        stats.test_success(test_run_info, test_plan);
                     }
                     // Expected the test to abort with a specific `code` but it aborted with a
                     // different `other_code`
@@ -406,20 +414,20 @@ impl SharedTestingConfig {
                                 Some(err),
                                 save_session_state(),
                             ),
-                            &test_plan,
+                            test_plan,
                         )
                     }
                     // Expected the test to abort and it aborted, but we don't need to check the code
                     (Some(ExpectedFailure::Expected), Some(_)) => {
                         pass(function_name);
-                        stats.test_success(test_run_info, &test_plan);
+                        stats.test_success(test_run_info, test_plan);
                     }
                     // Expected the test to abort and it aborted with internal error
                     (Some(ExpectedFailure::Expected), None)
                         if err.major_status() != StatusCode::EXECUTED =>
                     {
                         pass(function_name);
-                        stats.test_success(test_run_info, &test_plan);
+                        stats.test_success(test_run_info, test_plan);
                     }
                     // Unexpected return status from the VM, signal that we hit an unknown error.
                     (_, None) => {
@@ -431,7 +439,7 @@ impl SharedTestingConfig {
                                 Some(err),
                                 save_session_state(),
                             ),
-                            &test_plan,
+                            test_plan,
                         )
                     }
                 },
@@ -446,12 +454,12 @@ impl SharedTestingConfig {
                                 None,
                                 save_session_state(),
                             ),
-                            &test_plan,
+                            test_plan,
                         )
                     } else {
                         // Expected the test to execute fully and it did
                         pass(function_name);
-                        stats.test_success(test_run_info, &test_plan);
+                        stats.test_success(test_run_info, test_plan);
                     }
                 }
             }

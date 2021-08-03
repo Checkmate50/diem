@@ -1,15 +1,15 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{diag, errors::new::Diagnostics};
-use codespan::{ByteIndex, Span};
+use crate::{diag, diagnostics::Diagnostics};
 use move_ir_types::location::*;
+use move_symbol_pool::Symbol;
 use std::{collections::BTreeMap, iter::Peekable, str::Chars};
 
 /// Types to represent comments.
-pub type CommentMap = BTreeMap<&'static str, MatchedFileCommentMap>;
-pub type MatchedFileCommentMap = BTreeMap<ByteIndex, String>;
-pub type FileCommentMap = BTreeMap<Span, String>;
+pub type CommentMap = BTreeMap<Symbol, MatchedFileCommentMap>;
+pub type MatchedFileCommentMap = BTreeMap<u32, String>;
+pub type FileCommentMap = BTreeMap<(u32, u32), String>;
 
 /// Determine if a character is an allowed eye-visible (printable) character.
 ///
@@ -39,7 +39,7 @@ pub fn is_permitted_char(c: char) -> bool {
     is_permitted_printable_char(c) || is_permitted_newline_char(c)
 }
 
-fn verify_string(fname: &'static str, string: &str) -> Result<(), Diagnostics> {
+fn verify_string(fname: Symbol, string: &str) -> Result<(), Diagnostics> {
     match string
         .chars()
         .enumerate()
@@ -47,8 +47,7 @@ fn verify_string(fname: &'static str, string: &str) -> Result<(), Diagnostics> {
     {
         None => Ok(()),
         Some((idx, chr)) => {
-            let span = Span::new(ByteIndex(idx as u32), ByteIndex(idx as u32));
-            let loc = Loc::new(fname, span);
+            let loc = Loc::new(fname, idx as u32, idx as u32);
             let msg = format!(
                 "Invalid character '{}' found when reading file. Only ASCII printable characters, \
                  tabs (\\t), and line endings (\\n) are permitted.",
@@ -72,10 +71,7 @@ fn verify_string(fname: &'static str, string: &str) -> Result<(), Diagnostics> {
 /// (`/// .. <newline>` and `/** .. */`) will be not included in extracted comment string. The
 /// span in the returned map, however, covers the whole region of the comment, including the
 /// delimiters.
-fn strip_comments(
-    fname: &'static str,
-    input: &str,
-) -> Result<(String, FileCommentMap), Diagnostics> {
+fn strip_comments(fname: Symbol, input: &str) -> Result<(String, FileCommentMap), Diagnostics> {
     const SLASH: char = '/';
     const SPACE: char = ' ';
     const STAR: char = '*';
@@ -105,7 +101,7 @@ fn strip_comments(
         State::BlockComment if !content.starts_with('*') || content.starts_with("**") => {}
         State::LineComment if !content.starts_with('/') || content.starts_with("//") => {}
         _ => {
-            comment_map.insert(Span::new(start_pos, end_pos), content[1..].to_string());
+            comment_map.insert((start_pos, end_pos), content[1..].to_string());
         }
     };
 
@@ -218,8 +214,8 @@ fn strip_comments(
                 // try to point to last real character
                 pos -= 1;
             }
-            let loc = Loc::new(fname, Span::new(pos, pos));
-            let start_loc = Loc::new(fname, Span::new(comment_start_pos, comment_start_pos + 2));
+            let loc = Loc::new(fname, pos, pos);
+            let start_loc = Loc::new(fname, comment_start_pos, comment_start_pos + 2);
             let diag = diag!(
                 Syntax::InvalidDocComment,
                 (loc, "Unclosed block comment"),
@@ -236,7 +232,7 @@ fn strip_comments(
 // We restrict strings to only ascii visual characters (0x20 <= c <= 0x7E) or a permitted newline
 // character--\n--or a tab--\t.
 pub(crate) fn strip_comments_and_verify(
-    fname: &'static str,
+    fname: Symbol,
     string: &str,
 ) -> Result<(String, FileCommentMap), Diagnostics> {
     verify_string(fname, string)?;

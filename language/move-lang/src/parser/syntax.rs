@@ -1,16 +1,16 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use codespan::{ByteIndex, Span};
 use move_ir_types::location::*;
+use move_symbol_pool::Symbol;
 
 use crate::{
     diag,
-    errors::new::{Diagnostic, Diagnostics},
+    diagnostics::{Diagnostic, Diagnostics},
     parser::{ast::*, lexer::*},
     shared::*,
+    FileCommentMap, MatchedFileCommentMap,
 };
-use std::collections::BTreeMap;
 
 // In the informal grammar comments in this file, Comma<T> is shorthand for:
 //      (<T> ",")* <T>?
@@ -59,11 +59,8 @@ fn unexpected_token_error_(
 // Miscellaneous Utilities
 //**************************************************************************************************
 
-pub fn make_loc(file: &'static str, start: usize, end: usize) -> Loc {
-    Loc::new(
-        file,
-        Span::new(ByteIndex(start as u32), ByteIndex(end as u32)),
-    )
+pub fn make_loc(file: Symbol, start: usize, end: usize) -> Loc {
+    Loc::new(file, start as u32, end as u32)
 }
 
 fn current_token_loc(tokens: &Lexer) -> Loc {
@@ -75,7 +72,7 @@ fn current_token_loc(tokens: &Lexer) -> Loc {
     )
 }
 
-fn spanned<T>(file: &'static str, start: usize, end: usize, value: T) -> Spanned<T> {
+fn spanned<T>(file: Symbol, start: usize, end: usize, value: T) -> Spanned<T> {
     Spanned {
         loc: make_loc(file, start, end),
         value,
@@ -786,7 +783,7 @@ fn parse_sequence(tokens: &mut Lexer) -> Result<Sequence, Diagnostic> {
             break;
         }
         seq.push(item);
-        last_semicolon_loc = Some(current_token_loc(&tokens));
+        last_semicolon_loc = Some(current_token_loc(tokens));
         consume_token(tokens, Tok::Semicolon)?;
     }
     tokens.advance()?; // consume the RBrace
@@ -911,7 +908,7 @@ fn parse_name_exp(tokens: &mut Lexer) -> Result<Exp_, Diagnostic> {
     // assume that the "<" is a boolean operator.
     let mut tys = None;
     let start_loc = tokens.start_loc();
-    if tokens.peek() == Tok::Less && start_loc == n.loc.span().end().to_usize() {
+    if tokens.peek() == Tok::Less && start_loc == n.loc.end() as usize {
         let loc = make_loc(tokens.file_name(), start_loc, start_loc);
         tys = parse_optional_type_args(tokens).map_err(|mut diag| {
             let msg = "Perhaps you need a blank space before this '<' operator?";
@@ -1148,7 +1145,7 @@ fn parse_binop_exp(tokens: &mut Lexer, lhs: Exp, min_prec: u32) -> Result<Exp, D
         };
         let sp_op = spanned(tokens.file_name(), op_start_loc, op_end_loc, op);
 
-        let start_loc = result.loc.span().start().to_usize();
+        let start_loc = result.loc.start() as usize;
         let end_loc = tokens.previous_end_loc();
         let e = Exp_::BinopExp(Box::new(result), sp_op, Box::new(rhs));
         result = spanned(tokens.file_name(), start_loc, end_loc, e);
@@ -2323,7 +2320,8 @@ fn parse_spec_block_member(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagno
         Tok::Fun | Tok::Native => parse_spec_function(tokens),
         Tok::IdentifierValue => match tokens.content() {
             "assert" | "assume" | "decreases" | "aborts_if" | "aborts_with" | "succeeds_if"
-            | "modifies" | "emits" | "ensures" | "requires" | "axiom" => parse_condition(tokens),
+            | "modifies" | "emits" | "ensures" | "requires" => parse_condition(tokens),
+            "axiom" => parse_axiom(tokens),
             "include" => parse_spec_include(tokens),
             "apply" => parse_spec_apply(tokens),
             "pragma" => parse_spec_pragma(tokens),
@@ -2345,17 +2343,16 @@ fn parse_spec_block_member(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagno
 
 // Parse a specification condition:
 //    SpecCondition =
-//        ("assert" | "assume" | "decreases" | "ensures" | "requires" )
-//        <ConditionProperties> <Exp> ";"
+//        ("assert" | "assume" | "ensures" | "requires" ) <ConditionProperties> <Exp> ";"
 //      | "aborts_if" <ConditionProperties> <Exp> ["with" <Exp>] ";"
-//      | "aborts_with" <ConditionProperties> Comma <Exp> ";"
+//      | "aborts_with" <ConditionProperties> <Exp> [Comma <Exp>]* ";"
+//      | "decreases" <ConditionProperties> <Exp> ";"
 //      | "emits" <ConditionProperties> <Exp> "to" <Exp> [If <Exp>] ";"
 fn parse_condition(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagnostic> {
     let start_loc = tokens.start_loc();
     let kind = match tokens.content() {
         "assert" => SpecConditionKind::Assert,
         "assume" => SpecConditionKind::Assume,
-        "axiom" => SpecConditionKind::Axiom,
         "decreases" => SpecConditionKind::Decreases,
         "aborts_if" => SpecConditionKind::AbortsIf,
         "aborts_with" => SpecConditionKind::AbortsWith,
@@ -2411,6 +2408,7 @@ fn parse_condition(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagnostic> {
         end_loc,
         SpecBlockMember_::Condition {
             kind,
+            type_parameters: vec![],
             properties,
             exp,
             additional_exps,
@@ -2435,11 +2433,35 @@ fn parse_condition_properties(tokens: &mut Lexer) -> Result<Vec<PragmaProperty>,
     Ok(properties)
 }
 
+// Parse an axiom:
+//     a = "axiom" <OptionalTypeParameters> <ConditionProperties> <Exp> ";"
+fn parse_axiom(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagnostic> {
+    let start_loc = tokens.start_loc();
+    consume_identifier(tokens, "axiom")?;
+    let type_parameters = parse_optional_type_parameters(tokens)?;
+    let properties = parse_condition_properties(tokens)?;
+    let exp = parse_exp(tokens)?;
+    consume_token(tokens, Tok::Semicolon)?;
+    Ok(spanned(
+        tokens.file_name(),
+        start_loc,
+        tokens.previous_end_loc(),
+        SpecBlockMember_::Condition {
+            kind: SpecConditionKind::Axiom,
+            type_parameters,
+            properties,
+            exp,
+            additional_exps: vec![],
+        },
+    ))
+}
+
 // Parse an invariant:
-//     Invariant = "invariant" [ "update" ] <ConditionProperties> <Exp> ";"
+//     Invariant = "invariant" <OptionalTypeParameters> [ "update" ] <ConditionProperties> <Exp> ";"
 fn parse_invariant(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagnostic> {
     let start_loc = tokens.start_loc();
     consume_token(tokens, Tok::Invariant)?;
+    let type_parameters = parse_optional_type_parameters(tokens)?;
     let kind = match tokens.peek() {
         Tok::IdentifierValue if tokens.content() == "update" => {
             tokens.advance()?;
@@ -2456,6 +2478,7 @@ fn parse_invariant(tokens: &mut Lexer) -> Result<SpecBlockMember, Diagnostic> {
         tokens.previous_end_loc(),
         SpecBlockMember_::Condition {
             kind,
+            type_parameters,
             properties,
             exp,
             additional_exps: vec![],
@@ -2818,10 +2841,10 @@ fn parse_file(tokens: &mut Lexer) -> Result<Vec<Definition>, Diagnostic> {
 /// result as either a pair of FileDefinition and doc comments or some Diagnostics. The `file` name
 /// is used to identify source locations in error messages.
 pub fn parse_file_string(
-    file: &'static str,
+    file: Symbol,
     input: &str,
-    comment_map: BTreeMap<Span, String>,
-) -> Result<(Vec<Definition>, BTreeMap<ByteIndex, String>), Diagnostics> {
+    comment_map: FileCommentMap,
+) -> Result<(Vec<Definition>, MatchedFileCommentMap), Diagnostics> {
     let mut tokens = Lexer::new(input, file, comment_map);
     match tokens.advance() {
         Err(err) => Err(Diagnostics::from(vec![err])),

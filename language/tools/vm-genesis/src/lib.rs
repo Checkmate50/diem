@@ -85,7 +85,7 @@ pub fn encode_genesis_change_set(
     let mut state_view = GenesisStateView::new();
     for module_bytes in stdlib_module_bytes {
         let module = CompiledModule::deserialize(module_bytes).unwrap();
-        state_view.add_module(&module.self_id(), &module_bytes);
+        state_view.add_module(&module.self_id(), module_bytes);
         stdlib_modules.push(module)
     }
     let data_cache = StateViewCache::new(&state_view);
@@ -102,8 +102,8 @@ pub fn encode_genesis_change_set(
 
     create_and_initialize_main_accounts(
         &mut session,
-        &&diem_root_key,
-        &treasury_compliance_key,
+        diem_root_key,
+        treasury_compliance_key,
         vm_publishing_option,
         &xdx_ty,
         chain_id,
@@ -116,7 +116,7 @@ pub fn encode_genesis_change_set(
         .iter()
         .any(|test_chain_id| test_chain_id.id() == chain_id.id())
     {
-        create_and_initialize_testnet_minting(&mut session, &&treasury_compliance_key);
+        create_and_initialize_testnet_minting(&mut session, treasury_compliance_key);
     }
 
     let (mut changeset1, mut events1) = session.finish().unwrap();
@@ -351,18 +351,32 @@ fn create_and_initialize_owners_operators(
 /// Publish the standard library.
 fn publish_stdlib(session: &mut Session<StateViewCache>, stdlib: Modules) {
     let dep_graph = stdlib.compute_dependency_graph();
-    for module in dep_graph.compute_topological_order().unwrap() {
-        let module_id = module.self_id();
-        if module_id.name().as_str() == GENESIS_MODULE_NAME {
-            // Do not publish the Genesis module
-            continue;
-        }
-        let mut bytes = vec![];
-        module.serialize(&mut bytes).unwrap();
-        session
-            .publish_module(bytes, *module_id.address(), &mut GasStatus::new_unmetered())
-            .unwrap_or_else(|e| panic!("Failure publishing module {:?}, {:?}", module_id, e));
-    }
+    let mut addr_opt: Option<AccountAddress> = None;
+    let modules = dep_graph
+        .compute_topological_order()
+        .unwrap()
+        .map(|m| {
+            let addr = *m.self_id().address();
+            if let Some(a) = addr_opt {
+              assert!(
+                  a == addr,
+                  "All genesis modules must be published under the same address, but found modules under both {} and {}",
+                  a.short_str_lossless(),
+                  addr.short_str_lossless()
+              );
+            } else {
+                addr_opt = Some(addr)
+            }
+            let mut bytes = vec![];
+            m.serialize(&mut bytes).unwrap();
+            bytes
+        })
+        .collect::<Vec<Vec<u8>>>();
+    // TODO: allow genesis modules published under different addresses. supporting this while
+    // maintaining the topological order is challenging.
+    session
+        .publish_module_bundle(modules, addr_opt.unwrap(), &mut GasStatus::new_unmetered())
+        .unwrap_or_else(|e| panic!("Failure publishing modules {:?}", e));
 }
 
 /// Trigger a reconfiguration. This emits an event that will be passed along to the storage layer.
@@ -432,7 +446,7 @@ pub fn test_genesis_change_set_and_validators(
     count: Option<usize>,
 ) -> (ChangeSet, Vec<TestValidator>) {
     generate_test_genesis(
-        &current_module_blobs(),
+        current_module_blobs(),
         VMPublishingOption::locked(LegacyStdlibScript::allowlist()),
         count,
     )

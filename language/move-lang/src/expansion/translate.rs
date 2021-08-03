@@ -3,7 +3,7 @@
 
 use crate::{
     diag,
-    errors::new::Diagnostic,
+    diagnostics::Diagnostic,
     expansion::{
         address_map::build_address_map,
         aliases::{AliasMap, AliasSet},
@@ -22,6 +22,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     iter::IntoIterator,
 };
+
+use super::aliases::{AliasMapBuilder, OldAliasMap};
 
 //**************************************************************************************************
 // Context
@@ -60,18 +62,9 @@ impl<'env> Context<'env> {
         self.address.as_ref().unwrap()
     }
 
-    /// Adds all of the new items in the new inner scope as shadowing the outer one.
-    /// Gives back the outer scope
-    pub fn new_alias_scope(&mut self, inner_scope: AliasMap) -> AliasMap {
-        let outer_scope = self.aliases.clone();
-        self.aliases.add_and_shadow_all(inner_scope);
-        outer_scope
-    }
-
-    /// Resets the alias map and gives the set of aliases that were used
-    pub fn set_to_outer_scope(&mut self, outer_scope: AliasMap) {
-        let inner_scope = std::mem::replace(&mut self.aliases, outer_scope);
-        let AliasSet { modules, members } = self.aliases.close_scope_and_report_unused(inner_scope);
+    /// Resets the alias map and reports errors for aliases that were unused
+    pub fn set_to_outer_scope(&mut self, outer_scope: OldAliasMap) {
+        let AliasSet { modules, members } = self.aliases.set_to_outer_scope(outer_scope);
         for alias in modules {
             unused_alias(self, alias)
         }
@@ -92,7 +85,7 @@ impl<'env> Context<'env> {
     }
 
     pub fn extract_exp_specs(&mut self) -> BTreeMap<SpecId, E::SpecBlock> {
-        std::mem::replace(&mut self.exp_specs, BTreeMap::new())
+        std::mem::take(&mut self.exp_specs)
     }
 }
 
@@ -365,13 +358,13 @@ fn module_(
         ModuleIdent_::new(context.cur_address().clone(), name),
     );
 
-    let mut new_scope = AliasMap::new();
+    let mut new_scope = AliasMapBuilder::new();
     module_self_aliases(&mut new_scope, &current_module);
     let members = members
         .into_iter()
         .filter_map(|member| aliases_from_member(context, &mut new_scope, &current_module, member))
         .collect::<Vec<_>>();
-    let old_aliases = context.new_alias_scope(new_scope);
+    let old_aliases = context.aliases.add_and_shadow_all(new_scope);
     assert!(
         old_aliases.is_empty(),
         "ICE there should be no aliases entering a module"
@@ -432,11 +425,11 @@ fn script_(context: &mut Context, pscript: P::Script) -> E::Script {
     } = pscript;
 
     let attributes = flatten_attributes(context, attributes);
-    let mut new_scope = AliasMap::new();
+    let mut new_scope = AliasMapBuilder::new();
     for u in uses {
         use_(context, &mut new_scope, u.use_);
     }
-    let old_aliases = context.new_alias_scope(new_scope);
+    let old_aliases = context.aliases.add_and_shadow_all(new_scope);
     assert!(
         old_aliases.is_empty(),
         "ICE there should be no aliases entering a script"
@@ -556,7 +549,7 @@ fn all_module_members<'a>(
                 let addr = match &m.address {
                     Some(a) => address_impl(
                         compilation_env,
-                        &address_mapping,
+                        address_mapping,
                         /* suggest_declaration */ true,
                         a.clone(),
                     ),
@@ -568,7 +561,7 @@ fn all_module_members<'a>(
             P::Definition::Address(addr_def) => {
                 let addr = address_impl(
                     compilation_env,
-                    &address_mapping,
+                    address_mapping,
                     /* suggest_declaration */ false,
                     addr_def.addr.clone(),
                 );
@@ -632,7 +625,7 @@ fn module_members(
     members.add(mident, cur_members).unwrap();
 }
 
-fn module_self_aliases(acc: &mut AliasMap, current_module: &ModuleIdent) {
+fn module_self_aliases(acc: &mut AliasMapBuilder, current_module: &ModuleIdent) {
     let self_name = sp(current_module.loc, ModuleName::SELF_NAME.into());
     acc.add_implicit_module_alias(self_name, current_module.clone())
         .unwrap()
@@ -640,7 +633,7 @@ fn module_self_aliases(acc: &mut AliasMap, current_module: &ModuleIdent) {
 
 fn aliases_from_member(
     context: &mut Context,
-    acc: &mut AliasMap,
+    acc: &mut AliasMapBuilder,
     current_module: &ModuleIdent,
     member: P::ModuleMember,
 ) -> Option<P::ModuleMember> {
@@ -709,7 +702,7 @@ fn aliases_from_member(
     }
 }
 
-fn use_(context: &mut Context, acc: &mut AliasMap, u: P::Use) {
+fn use_(context: &mut Context, acc: &mut AliasMapBuilder, u: P::Use) {
     let unbound_module = |mident: &ModuleIdent| -> Diagnostic {
         diag!(
             NameResolution::UnboundModule,
@@ -845,7 +838,7 @@ fn struct_def(
 ) {
     let (sname, sdef) = struct_def_(context, pstruct);
     if let Err(_old_loc) = structs.add(sname, sdef) {
-        assert!(context.env.has_errors())
+        assert!(context.env.has_diags())
     }
 }
 
@@ -862,8 +855,10 @@ fn struct_def_(
         fields: pfields,
     } = pstruct;
     let attributes = flatten_attributes(context, attributes);
-    let old_aliases = context.new_alias_scope(AliasMap::new());
     let type_parameters = struct_type_parameters(context, pty_params);
+    let old_aliases = context
+        .aliases
+        .shadow_for_type_parameters(type_parameters.iter().map(|tp| &tp.name));
     let abilities = ability_set(context, "modifier", abilities_vec);
     let fields = struct_fields(context, &name, pfields);
     let sdef = E::StructDefinition {
@@ -931,7 +926,7 @@ fn friend(
                 ));
             }
         },
-        None => assert!(context.env.has_errors()),
+        None => assert!(context.env.has_diags()),
     };
 }
 
@@ -958,7 +953,7 @@ fn constant(
 ) {
     let (name, constant) = constant_(context, pconstant);
     if let Err(_old_loc) = constants.add(name, constant) {
-        assert!(context.env.has_errors())
+        assert!(context.env.has_diags())
     }
 }
 
@@ -995,7 +990,7 @@ fn function(
 ) {
     let (fname, fdef) = function_(context, pfunction);
     if let Err(_old_loc) = functions.add(fname, fdef) {
-        assert!(context.env.has_errors())
+        assert!(context.env.has_diags())
     }
 }
 
@@ -1011,8 +1006,7 @@ fn function_(context: &mut Context, pfunction: P::Function) -> (FunctionName, E:
     } = pfunction;
     assert!(context.exp_specs.is_empty());
     let attributes = flatten_attributes(context, pattributes);
-    let old_aliases = context.new_alias_scope(AliasMap::new());
-    let signature = function_signature(context, psignature);
+    let (old_aliases, signature) = function_signature(context, psignature);
     let acquires = acquires
         .into_iter()
         .flat_map(|a| name_access_chain(context, Access::Type, a))
@@ -1029,20 +1023,22 @@ fn function_(context: &mut Context, pfunction: P::Function) -> (FunctionName, E:
         specs,
     };
     context.set_to_outer_scope(old_aliases);
-
     (name, fdef)
 }
 
 fn function_signature(
     context: &mut Context,
     psignature: P::FunctionSignature,
-) -> E::FunctionSignature {
+) -> (OldAliasMap, E::FunctionSignature) {
     let P::FunctionSignature {
         type_parameters: pty_params,
         parameters: pparams,
         return_type: pret_ty,
     } = psignature;
-    let type_parameters = fun_type_parameters(context, pty_params);
+    let type_parameters = type_parameters(context, pty_params);
+    let old_aliases = context
+        .aliases
+        .shadow_for_type_parameters(type_parameters.iter().map(|(name, _)| name));
     let parameters = pparams
         .into_iter()
         .map(|(v, t)| (v, type_(context, t)))
@@ -1051,11 +1047,12 @@ fn function_signature(
         check_valid_local_name(context, v)
     }
     let return_type = type_(context, pret_ty);
-    E::FunctionSignature {
+    let signature = E::FunctionSignature {
         type_parameters,
         parameters,
         return_type,
-    }
+    };
+    (old_aliases, signature)
 }
 
 fn function_body(context: &mut Context, sp!(loc, pbody_): P::FunctionBody) -> E::FunctionBody {
@@ -1086,11 +1083,11 @@ fn spec(context: &mut Context, sp!(loc, pspec): P::SpecBlock) -> E::SpecBlock {
 
     let attributes = flatten_attributes(context, pattributes);
     context.in_spec_context = true;
-    let mut new_scope = AliasMap::new();
+    let mut new_scope = AliasMapBuilder::new();
     for u in uses {
         use_(context, &mut new_scope, u.use_);
     }
-    let old_aliases = context.new_alias_scope(new_scope);
+    let old_aliases = context.aliases.add_and_shadow_all(new_scope);
 
     let members = pmembers
         .into_iter()
@@ -1116,21 +1113,15 @@ fn spec_target(context: &mut Context, sp!(loc, pt): P::SpecBlockTarget) -> E::Sp
     let et = match pt {
         PT::Code => ET::Code,
         PT::Module => ET::Module,
-        PT::Schema(name, type_params) => {
-            let old_aliases = context.new_alias_scope(AliasMap::new());
-            let target = ET::Schema(name, fun_type_parameters(context, type_params));
-            context.set_to_outer_scope(old_aliases);
-            target
-        }
-        PT::Member(name, signature_opt) => {
-            let old_aliases = context.new_alias_scope(AliasMap::new());
-            let target = ET::Member(
-                name,
-                signature_opt.map(|s| Box::new(function_signature(context, *s))),
-            );
-            context.set_to_outer_scope(old_aliases);
-            target
-        }
+        PT::Schema(name, type_params) => ET::Schema(name, type_parameters(context, type_params)),
+        PT::Member(name, signature_opt) => ET::Member(
+            name,
+            signature_opt.map(|s| {
+                let (old_aliases, signature) = function_signature(context, *s);
+                context.set_to_outer_scope(old_aliases);
+                Box::new(signature)
+            }),
+        ),
     };
     sp(loc, et)
 }
@@ -1141,10 +1132,15 @@ fn spec_member(context: &mut Context, sp!(loc, pm): P::SpecBlockMember) -> E::Sp
     let em = match pm {
         PM::Condition {
             kind,
+            type_parameters: pty_params,
             properties: pproperties,
             exp,
             additional_exps,
         } => {
+            let type_parameters = type_parameters(context, pty_params);
+            let old_aliases = context
+                .aliases
+                .shadow_for_type_parameters(type_parameters.iter().map(|(name, _)| name));
             let properties = pproperties
                 .into_iter()
                 .map(|p| pragma_property(context, p))
@@ -1154,8 +1150,10 @@ fn spec_member(context: &mut Context, sp!(loc, pm): P::SpecBlockMember) -> E::Sp
                 .into_iter()
                 .map(|e| exp_(context, e))
                 .collect();
+            context.set_to_outer_scope(old_aliases);
             EM::Condition {
                 kind,
+                type_parameters,
                 properties,
                 exp,
                 additional_exps,
@@ -1167,9 +1165,8 @@ fn spec_member(context: &mut Context, sp!(loc, pm): P::SpecBlockMember) -> E::Sp
             signature,
             body,
         } => {
-            let old_aliases = context.new_alias_scope(AliasMap::new());
+            let (old_aliases, signature) = function_signature(context, signature);
             let body = function_body(context, body);
-            let signature = function_signature(context, signature);
             context.set_to_outer_scope(old_aliases);
             EM::Function {
                 uninterpreted,
@@ -1184,8 +1181,10 @@ fn spec_member(context: &mut Context, sp!(loc, pm): P::SpecBlockMember) -> E::Sp
             type_parameters: pty_params,
             type_: t,
         } => {
-            let old_aliases = context.new_alias_scope(AliasMap::new());
-            let type_parameters = fun_type_parameters(context, pty_params);
+            let type_parameters = type_parameters(context, pty_params);
+            let old_aliases = context
+                .aliases
+                .shadow_for_type_parameters(type_parameters.iter().map(|(name, _)| name));
             let t = type_(context, t);
             context.set_to_outer_scope(old_aliases);
             EM::Variable {
@@ -1279,18 +1278,13 @@ fn ability_set(context: &mut Context, case: &str, abilities_vec: Vec<Ability>) -
     set
 }
 
-fn fun_type_parameters(
+fn type_parameters(
     context: &mut Context,
     pty_params: Vec<(Name, Vec<Ability>)>,
 ) -> Vec<(Name, E::AbilitySet)> {
-    assert!(
-        context.aliases.current_scope_is_empty(),
-        "ICE alias scope should be cleared before handling type parameters"
-    );
     pty_params
         .into_iter()
         .map(|(name, constraints_vec)| {
-            context.aliases.remove_member_alias(&name);
             let constraints = ability_set(context, "constraint", constraints_vec);
             (name, constraints)
         })
@@ -1301,19 +1295,12 @@ fn struct_type_parameters(
     context: &mut Context,
     pty_params: Vec<P::StructTypeParameter>,
 ) -> Vec<E::StructTypeParameter> {
-    assert!(
-        context.aliases.current_scope_is_empty(),
-        "ICE alias scope should be cleared before handling type parameters"
-    );
     pty_params
         .into_iter()
-        .map(|param| {
-            context.aliases.remove_member_alias(&param.name);
-            E::StructTypeParameter {
-                is_phantom: param.is_phantom,
-                name: param.name,
-                constraints: ability_set(context, "constraint", param.constraints),
-            }
+        .map(|param| E::StructTypeParameter {
+            is_phantom: param.is_phantom,
+            name: param.name,
+            constraints: ability_set(context, "constraint", param.constraints),
         })
         .collect()
 }
@@ -1328,7 +1315,7 @@ fn type_(context: &mut Context, sp!(loc, pt_): P::Type) -> E::Type {
             let tyargs = types(context, ptyargs);
             match name_access_chain(context, Access::Type, *pn) {
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     ET::UnresolvedError
                 }
                 Some(n) => ET::Apply(n, tyargs),
@@ -1478,16 +1465,14 @@ fn unexpected_address_module_error(loc: Loc, nloc: Loc, access: Access) -> Diagn
 // Expressions
 //**************************************************************************************************
 
-// TODO Support uses inside functions. AliasMap will become an accumulator
-
 fn sequence(context: &mut Context, loc: Loc, seq: P::Sequence) -> E::Sequence {
     let (uses, pitems, maybe_last_semicolon_loc, pfinal_item) = seq;
 
-    let mut new_scope = AliasMap::new();
+    let mut new_scope = AliasMapBuilder::new();
     for u in uses {
         use_(context, &mut new_scope, u.use_);
     }
-    let old_aliases = context.new_alias_scope(new_scope);
+    let old_aliases = context.aliases.add_and_shadow_all(new_scope);
     let mut items: VecDeque<E::SequenceItem> = pitems
         .into_iter()
         .map(|item| sequence_item(context, item))
@@ -1519,7 +1504,7 @@ fn sequence_item(context: &mut Context, sp!(loc, pitem_): P::SequenceItem) -> E:
             let ty_opt = pty_opt.map(|t| type_(context, t));
             match b_opt {
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     ES::Seq(sp(loc, E::Exp_::UnresolvedError))
                 }
                 Some(b) => ES::Declare(b, ty_opt),
@@ -1535,7 +1520,7 @@ fn sequence_item(context: &mut Context, sp!(loc, pitem_): P::SequenceItem) -> E:
             };
             match b_opt {
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     ES::Seq(sp(loc, E::Exp_::UnresolvedError))
                 }
                 Some(b) => ES::Bind(b, e),
@@ -1561,7 +1546,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
         PE::Value(pv) => match value(context, pv) {
             Some(v) => EE::Value(v),
             None => {
-                assert!(context.env.has_errors());
+                assert!(context.env.has_diags());
                 EE::UnresolvedError
             }
         },
@@ -1584,7 +1569,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
             match en_opt {
                 Some(en) => EE::Name(en, tys_opt),
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     EE::UnresolvedError
                 }
             }
@@ -1596,7 +1581,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
             match en_opt {
                 Some(en) => EE::Call(en, tys_opt, ers),
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     EE::UnresolvedError
                 }
             }
@@ -1612,7 +1597,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
             match en_opt {
                 Some(en) => EE::Pack(en, tys_opt, efields),
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     EE::UnresolvedError
                 }
             }
@@ -1642,7 +1627,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
                 match bs_opt {
                     Some(bs) => EE::Lambda(bs, Box::new(e)),
                     None => {
-                        assert!(context.env.has_errors());
+                        assert!(context.env.has_diags());
                         EE::UnresolvedError
                     }
                 }
@@ -1666,7 +1651,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
                 match rs_opt {
                     Some(rs) => EE::Quant(k, rs, rtrs, rc, Box::new(re)),
                     None => {
-                        assert!(context.env.has_errors());
+                        assert!(context.env.has_diags());
                         EE::UnresolvedError
                     }
                 }
@@ -1682,7 +1667,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
             let er = exp(context, *rhs);
             match l_opt {
                 None => {
-                    assert!(context.env.has_errors());
+                    assert!(context.env.has_diags());
                     EE::UnresolvedError
                 }
                 Some(LValue::Assigns(al)) => EE::Assign(al, er),
@@ -1720,7 +1705,7 @@ fn exp_(context: &mut Context, sp!(loc, pe_): P::Exp) -> E::Exp {
         pdotted_ @ PE::Dot(_, _) => match exp_dotted(context, sp(loc, pdotted_)) {
             Some(edotted) => EE::ExpDotted(Box::new(edotted)),
             None => {
-                assert!(context.env.has_errors());
+                assert!(context.env.has_diags());
                 EE::UnresolvedError
             }
         },
@@ -2191,7 +2176,7 @@ fn unbound_names_bind(unbound: &mut BTreeSet<Name>, sp!(_, l_): &E::LValue) {
     use E::LValue_ as EL;
     match l_ {
         EL::Var(sp!(_, E::ModuleAccess_::Name(n)), _) => {
-            unbound.remove(&n);
+            unbound.remove(n);
         }
         EL::Var(sp!(_, E::ModuleAccess_::ModuleAccess(..)), _) => {
             // Qualified vars are not considered in unbound set.

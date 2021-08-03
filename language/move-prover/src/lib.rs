@@ -19,7 +19,7 @@ use docgen::Docgen;
 use errmapgen::ErrmapGen;
 #[allow(unused_imports)]
 use log::{debug, info, warn};
-use move_model::{code_writer::CodeWriter, model::GlobalEnv, run_model_builder};
+use move_model::{code_writer::CodeWriter, model::GlobalEnv, run_model_builder_with_options};
 use std::{fs, path::PathBuf, time::Instant};
 
 pub mod cli;
@@ -39,7 +39,11 @@ pub fn run_move_prover<W: WriteColor>(
     let now = Instant::now();
 
     // Run the model builder.
-    let env = run_model_builder(&options.move_sources, &options.move_deps)?;
+    let env = run_model_builder_with_options(
+        &options.move_sources,
+        &options.move_deps,
+        options.model_builder.clone(),
+    )?;
     let build_duration = now.elapsed();
     check_errors(
         &env,
@@ -137,7 +141,7 @@ pub fn generate_boogie(
 ) -> anyhow::Result<CodeWriter> {
     let writer = CodeWriter::new(env.internal_loc());
     add_prelude(env, &options.backend, &writer)?;
-    let mut translator = BoogieTranslator::new(&env, &options.backend, &targets, &writer);
+    let mut translator = BoogieTranslator::new(env, &options.backend, targets, &writer);
     translator.translate();
     Ok(writer)
 }
@@ -152,8 +156,8 @@ pub fn verify_boogie(
     debug!("writing boogie to `{}`", &options.output_path);
     writer.process_result(|result| fs::write(&options.output_path, result))?;
     let boogie = BoogieWrapper {
-        env: &env,
-        targets: &targets,
+        env,
+        targets,
         writer: &writer,
         options: &options.backend,
     };

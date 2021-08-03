@@ -7,10 +7,11 @@ pub mod test_runner;
 use crate::test_runner::TestRunner;
 use move_core_types::language_storage::ModuleId;
 use move_lang::{
-    self, errors,
+    self, diagnostics,
     unit_test::{self, TestPlan},
     Compiler, Flags, PASS_CFGIR,
 };
+use move_vm_runtime::native_functions::NativeFunctionTable;
 use std::{
     io::{Result, Write},
     marker::Send,
@@ -103,19 +104,20 @@ impl UnitTestingConfig {
             .set_flags(Flags::testing())
             .run::<PASS_CFGIR>()
             .unwrap();
-        let (_, compiler) = move_lang::unwrap_or_report_errors!(files, comments_and_compiler_res);
+        let (_, compiler) =
+            diagnostics::unwrap_or_report_diagnostics(&files, comments_and_compiler_res);
 
         let (mut compiler, cfgir) = compiler.into_ast();
         let compilation_env = compiler.compilation_env();
         let test_plan = unit_test::plan_builder::construct_test_plan(compilation_env, &cfgir);
 
-        if let Err(errors) = compilation_env.check_errors() {
-            errors::report_errors(files, errors);
+        if let Err(diags) = compilation_env.check_diags() {
+            diagnostics::report_diagnostics(&files, diags);
         }
 
         let compilation_result = compiler.at_cfgir(cfgir).build();
 
-        let units = move_lang::unwrap_or_report_errors!(files, compilation_result);
+        let units = diagnostics::unwrap_or_report_diagnostics(&files, compilation_result);
         test_plan.map(|tests| TestPlan::new(tests, files, units))
     }
 
@@ -140,6 +142,7 @@ impl UnitTestingConfig {
     pub fn run_and_report_unit_tests<W: Write + Send>(
         &self,
         test_plan: TestPlan,
+        native_function_table: Option<NativeFunctionTable>,
         writer: W,
     ) -> Result<(W, bool)> {
         let shared_writer = Mutex::new(writer);
@@ -150,7 +153,7 @@ impl UnitTestingConfig {
                     writeln!(
                         shared_writer.lock().unwrap(),
                         "{}::{}: test",
-                        format_module_id(&module_id),
+                        format_module_id(module_id),
                         test_name
                     )?;
                 }
@@ -166,6 +169,7 @@ impl UnitTestingConfig {
             self.verbose,
             self.report_storage_on_error,
             test_plan,
+            native_function_table,
         )
         .unwrap();
 

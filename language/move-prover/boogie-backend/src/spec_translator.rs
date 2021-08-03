@@ -255,14 +255,23 @@ impl<'env> SpecTranslator<'env> {
                 &self.inst(&decl.type_),
             )
         });
+        // it is possible that the spec fun may refer to the same memory after monomorphization,
+        // (e.g., one via concrete type and the other via type parameter being instantiated).
+        // In this case, we mark the other parameter as unused
+        let mut mem_inst_seen = BTreeSet::new();
         let mem_params = fun.used_memory.iter().map(|memory| {
-            let memory = &memory.to_owned().instantiate(&self.type_inst);
+            let memory = memory.to_owned().instantiate(&self.type_inst);
             let struct_env = &self.env.get_struct_qid(memory.to_qualified_id());
-            format!(
+            let param_repr = format!(
                 "{}: $Memory {}",
-                boogie_resource_memory_name(self.env, memory, &None),
+                boogie_resource_memory_name(self.env, &memory, &None),
                 boogie_struct_name(struct_env, &memory.inst)
-            )
+            );
+            if mem_inst_seen.insert(memory) {
+                param_repr
+            } else {
+                format!("__unused_{}", param_repr)
+            }
         });
         let params = fun.params.iter().map(|(name, ty)| {
             format!(
@@ -272,7 +281,7 @@ impl<'env> SpecTranslator<'env> {
             )
         });
         self.writer.set_location(&fun.loc);
-        let boogie_name = boogie_spec_fun_name(&module_env, id, &self.type_inst);
+        let boogie_name = boogie_spec_fun_name(module_env, id, &self.type_inst);
         let param_list = mem_params.chain(spec_var_params).chain(params).join(", ");
         emit!(
             self.writer,
@@ -314,7 +323,6 @@ impl<'env> SpecTranslator<'env> {
                     );
                 }
             }
-            emitln!(self.writer);
         } else {
             emitln!(self.writer, " {");
             self.writer.indent();
@@ -322,8 +330,9 @@ impl<'env> SpecTranslator<'env> {
             emitln!(self.writer);
             self.writer.unindent();
             emitln!(self.writer, "}");
-            emitln!(self.writer);
         }
+
+        emitln!(self.writer);
     }
 }
 
@@ -823,7 +832,7 @@ impl<'env> SpecTranslator<'env> {
         let inst = &self.get_node_instantiation(node_id);
         let module_env = &self.env.get_module(module_id);
         let fun_decl = module_env.get_spec_fun(fun_id);
-        let name = boogie_spec_fun_name(&module_env, fun_id, inst);
+        let name = boogie_spec_fun_name(module_env, fun_id, inst);
         emit!(self.writer, "{}(", name);
         let mut first = true;
         let mut maybe_comma = || {
@@ -1012,9 +1021,7 @@ impl<'env> SpecTranslator<'env> {
         f();
         emit!(
             self.writer,
-            &std::iter::repeat(")")
-                .take(usize::checked_add(range_tmps.len(), resource_vars.len()).unwrap())
-                .collect::<String>()
+            &")".repeat(usize::checked_add(range_tmps.len(), resource_vars.len()).unwrap())
         );
     }
 
@@ -1036,7 +1043,7 @@ impl<'env> SpecTranslator<'env> {
                 Type::Vector(..) | Type::Primitive(PrimitiveType::Range) => {
                     let range_tmp = self.fresh_var_name("range");
                     emit!(self.writer, "(var {} := ", range_tmp);
-                    self.translate_exp(&range);
+                    self.translate_exp(range);
                     emit!(self.writer, "; ");
                     range_tmps.insert(var.name, range_tmp);
                 }
@@ -1095,7 +1102,7 @@ impl<'env> SpecTranslator<'env> {
                 for p in trigger {
                     emit!(self.writer, "{}", comma);
                     self.with_range_selector_assignments(
-                        &ranges,
+                        ranges,
                         &range_tmps,
                         &quant_vars,
                         &resource_vars,
@@ -1136,7 +1143,7 @@ impl<'env> SpecTranslator<'env> {
             let quant_ty = self.get_node_type(range.node_id());
             match quant_ty.skip_reference() {
                 Type::TypeDomain(domain_ty) => {
-                    let mut type_check = boogie_well_formed_expr(self.env, &var_name, &domain_ty);
+                    let mut type_check = boogie_well_formed_expr(self.env, &var_name, domain_ty);
                     if type_check.is_empty() {
                         type_check = "true".to_string();
                     }
@@ -1174,7 +1181,7 @@ impl<'env> SpecTranslator<'env> {
         }
         emit!(self.writer, "{}", separator);
         self.with_range_selector_assignments(
-            &ranges,
+            ranges,
             &range_tmps,
             &quant_vars,
             &resource_vars,
@@ -1192,9 +1199,7 @@ impl<'env> SpecTranslator<'env> {
         );
         emit!(
             self.writer,
-            &std::iter::repeat(")")
-                .take(range_tmps.len().checked_add(1).unwrap())
-                .collect::<String>()
+            &")".repeat(range_tmps.len().checked_add(1).unwrap())
         );
     }
 
@@ -1249,7 +1254,7 @@ impl<'env> SpecTranslator<'env> {
     fn translate_eq_neq(&self, boogie_val_fun: &str, args: &[Exp]) {
         let suffix = boogie_type_suffix(
             self.env,
-            &self.get_node_type(args[0].node_id()).skip_reference(),
+            self.get_node_type(args[0].node_id()).skip_reference(),
         );
         emit!(self.writer, "{}'{}'(", boogie_val_fun, suffix);
         self.translate_exp(&args[0]);

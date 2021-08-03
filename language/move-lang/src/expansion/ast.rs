@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    errors::Error,
+    diag,
+    diagnostics::Diagnostic,
     parser::ast::{
         Ability, Ability_, BinOp, ConstantName, Field, FunctionName, ModuleName, QuantKind,
         SpecApplyPattern, SpecConditionKind, StructName, UnaryOp, Var, Visibility,
@@ -221,6 +222,7 @@ pub type SpecBlockTarget = Spanned<SpecBlockTarget_>;
 pub enum SpecBlockMember_ {
     Condition {
         kind: SpecConditionKind,
+        type_parameters: Vec<(Name, AbilitySet)>,
         properties: Vec<PragmaProperty>,
         exp: Exp,
         additional_exps: Vec<Exp>,
@@ -456,7 +458,7 @@ impl Address {
         addresses: &UniqueMap<Name, AddressBytes>,
         loc: Loc,
         case: &str,
-    ) -> Result<AddressBytes, Error> {
+    ) -> Result<AddressBytes, Diagnostic> {
         match self {
             Self::Anonymous(sp!(_, bytes)) => Ok(bytes),
             Self::Named(n) => match addresses.get(&n) {
@@ -464,7 +466,11 @@ impl Address {
                 None => {
                     let unable_msg = format!("Unable to fully compile and resolve {}", case);
                     let addr_msg = format!("No value specified for address '{}'", n);
-                    Err(vec![(loc, unable_msg), (n.loc, addr_msg)])
+                    Err(diag!(
+                        BytecodeGeneration::UnassignedAddress,
+                        (loc, unable_msg),
+                        (n.loc, addr_msg)
+                    ))
                 }
             },
         }
@@ -521,7 +527,7 @@ impl AbilitySet {
     }
 
     pub fn has_ability(&self, a: &Ability) -> bool {
-        self.0.contains(&a)
+        self.0.contains(a)
     }
 
     pub fn has_ability_(&self, a: Ability_) -> bool {
@@ -947,11 +953,13 @@ impl AstDebug for SpecBlockMember_ {
         match self {
             SpecBlockMember_::Condition {
                 kind,
+                type_parameters,
                 properties: _,
                 exp,
                 additional_exps,
             } => {
                 kind.ast_debug(w);
+                type_parameters.ast_debug(w);
                 exp.ast_debug(w);
                 w.list(additional_exps, ",", |w, e| {
                     e.ast_debug(w);
@@ -1207,7 +1215,7 @@ impl AstDebug for StructTypeParameter {
             w.write("phantom ");
         }
         w.write(&name.value);
-        ability_constraints_ast_debug(w, &constraints)
+        ability_constraints_ast_debug(w, constraints)
     }
 }
 

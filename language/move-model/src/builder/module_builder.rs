@@ -36,13 +36,15 @@ use crate::{
     },
     exp_rewriter::{ExpRewriter, ExpRewriterFunctions, RewriteTarget},
     model::{
-        AbilityConstraint, FieldId, FunId, FunctionData, Loc, ModuleId, MoveIrLoc,
-        NamedConstantData, NamedConstantId, NodeId, QualifiedInstId, SchemaId, SpecFunId,
-        SpecVarId, StructData, StructId, TypeParameter, SCRIPT_BYTECODE_FUN_NAME,
+        AbilityConstraint, FieldId, FunId, FunctionData, FunctionVisibility, Loc, ModuleId,
+        MoveIrLoc, NamedConstantData, NamedConstantId, NodeId, QualifiedInstId, SchemaId,
+        SpecFunId, SpecVarId, StructData, StructId, TypeParameter, SCRIPT_BYTECODE_FUN_NAME,
     },
+    options::ModelBuilderOptions,
     pragmas::{
-        is_pragma_valid_for_block, is_property_valid_for_condition, CONDITION_DEACTIVATED_PROP,
-        CONDITION_INJECTED_PROP,
+        is_pragma_valid_for_block, is_property_valid_for_condition, CONDITION_ABSTRACT_PROP,
+        CONDITION_CONCRETE_PROP, CONDITION_DEACTIVATED_PROP, CONDITION_INJECTED_PROP,
+        OPAQUE_PRAGMA,
     },
     project_1st, project_2nd,
     symbol::{Symbol, SymbolPool},
@@ -228,7 +230,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 }
             }
             EA::SpecBlockTarget_::Schema(name, _) => {
-                let qsym = self.qualified_by_module_from_name(&name);
+                let qsym = self.qualified_by_module_from_name(name);
                 if self.parent.spec_schema_table.contains_key(&qsym) {
                     Some(SpecBlockContext::Schema(qsym))
                 } else {
@@ -323,14 +325,19 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         et.enter_scope();
         let params = et.analyze_and_add_params(&def.signature.parameters, true);
         let result_type = et.translate_type(&def.signature.return_type);
-        let is_public = matches!(def.visibility, PA::Visibility::Public(..));
+        let visibility = match def.visibility {
+            PA::Visibility::Public(_) => FunctionVisibility::Public,
+            PA::Visibility::Script(_) => FunctionVisibility::Script,
+            PA::Visibility::Friend(_) => FunctionVisibility::Friend,
+            PA::Visibility::Internal => FunctionVisibility::Private,
+        };
         let loc = et.to_loc(&def.loc);
         et.parent.parent.define_fun(
             loc.clone(),
             qsym.clone(),
             et.parent.module_id,
             fun_id,
-            is_public,
+            visibility,
             type_params.clone(),
             params.clone(),
             result_type.clone(),
@@ -377,7 +384,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         }
         // If this is a schema spec block, process its declaration.
         if let EA::SpecBlockTarget_::Schema(name, type_params) = &block.value.target.value {
-            self.decl_ana_schema(&block, &name, type_params.iter().map(|(name, _)| name));
+            self.decl_ana_schema(block, name, type_params.iter().map(|(name, _)| name));
         }
     }
 
@@ -642,6 +649,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                     match &member.value {
                         EA::SpecBlockMember_::Condition {
                             kind,
+                            type_parameters,
                             properties,
                             exp,
                             additional_exps,
@@ -664,6 +672,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                                     loc,
                                     &context,
                                     kind,
+                                    type_parameters,
                                     properties,
                                     exp,
                                     additional_exps,
@@ -671,7 +680,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                             }
                         }
                         _ => {
-                            self.parent.error(&loc, "item not allowed");
+                            self.parent.error(loc, "item not allowed");
                         }
                     }
                 }
@@ -743,7 +752,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 let mut field_map = BTreeMap::new();
                 for (_name_loc, field_name_, (idx, ty)) in fields {
                     let field_sym = et.symbol_pool().make(field_name_);
-                    let field_ty = et.translate_type(&ty);
+                    let field_ty = et.translate_type(ty);
                     field_map.insert(field_sym, (*idx, field_ty));
                 }
                 Some(field_map)
@@ -784,7 +793,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             for (idx, (n, ty)) in params.iter().enumerate() {
                 et.define_local(&loc, *n, ty.clone(), None, Some(idx));
             }
-            let translated = et.translate_seq(&loc, &seq, &result_type);
+            let translated = et.translate_seq(&loc, seq, &result_type);
             et.finalize_types();
             // If no errors were generated, then the function is considered pure.
             if !*et.errors_generated.borrow() {
@@ -914,7 +923,50 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         });
 
         for member in let_sorted_members {
-            self.def_ana_spec_block_member(context, &member)
+            self.def_ana_spec_block_member(context, member)
+        }
+
+        // tweak the opaque pragma.
+        //
+        // If the `ignore_pragma_opaque_when_possible` option is set, the opaque pragma will be
+        // removed from the function spec property bag when
+        // - "pragma" is in the property bag, and
+        // - the function does not have unknown callers (i.e., the function can be either `friend`
+        //   or `private` visibility), and
+        // - there are no properties marked as "[concrete]" or "[abstract]" in the function spec.
+        if let SpecBlockContext::Function(fun_name) = context {
+            let env = &self.parent.env;
+            let ignore_pragma_opaque_when_possible = env
+                .get_extension::<ModelBuilderOptions>()
+                .map_or(false, |options| options.ignore_pragma_opaque_when_possible);
+            if ignore_pragma_opaque_when_possible {
+                let spec = self.fun_specs.get_mut(&fun_name.symbol).unwrap();
+                let has_pragma_opaque = env
+                    .is_property_true(&spec.properties, OPAQUE_PRAGMA)
+                    .unwrap_or(false);
+                if has_pragma_opaque {
+                    let fun_entry = self.parent.fun_table.get(fun_name).unwrap();
+                    let has_unknown_caller = matches!(
+                        fun_entry.visibility,
+                        FunctionVisibility::Public | FunctionVisibility::Script
+                    );
+                    if !has_unknown_caller {
+                        let has_opaque_prop = spec.any(|cond| {
+                            env.is_property_true(&cond.properties, CONDITION_CONCRETE_PROP)
+                                .unwrap_or(false)
+                                || env
+                                    .is_property_true(&cond.properties, CONDITION_ABSTRACT_PROP)
+                                    .unwrap_or(false)
+                        });
+                        if !has_opaque_prop {
+                            let opaque_symbol = env.symbol_pool().make(OPAQUE_PRAGMA);
+                            self.update_spec(context, move |spec| {
+                                spec.properties.remove(&opaque_symbol);
+                            })
+                        }
+                    }
+                }
+            }
         }
 
         // clear the let bindings stored in the build.
@@ -931,6 +983,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         match &member.value {
             Condition {
                 kind,
+                type_parameters,
                 properties,
                 exp,
                 additional_exps,
@@ -943,7 +996,15 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                             None
                         }
                     });
-                    self.def_ana_condition(loc, context, kind, properties, exp, additional_exps)
+                    self.def_ana_condition(
+                        loc,
+                        context,
+                        kind,
+                        type_parameters,
+                        properties,
+                        exp,
+                        additional_exps,
+                    )
                 }
             }
             Function {
@@ -1306,11 +1367,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             Struct(_) => cond.kind.allowed_on_struct(),
             Function(name) => {
                 let entry = self.parent.fun_table.get(name).expect("function defined");
-                if entry.is_public {
-                    cond.kind.allowed_on_public_fun_decl()
-                } else {
-                    cond.kind.allowed_on_private_fun_decl()
-                }
+                cond.kind.allowed_on_fun_decl(entry.visibility)
             }
             FunctionCode(_, _) => cond.kind.allowed_on_fun_impl(),
             Schema(_) => true,
@@ -1451,7 +1508,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                     }
                     None
                 };
-                let mut rewriter = ExpRewriter::new(&self.parent.env, &mut replacer);
+                let mut rewriter = ExpRewriter::new(self.parent.env, &mut replacer);
                 let exp = rewriter.rewrite_exp(exp);
                 let additional_exps = additional_exps
                     .into_iter()
@@ -1531,17 +1588,31 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         loc: &Loc,
         context: &SpecBlockContext,
         kind: ConditionKind,
+        type_parameters: &[(Name, EA::AbilitySet)],
         properties: PropertyBag,
         exp: &EA::Exp,
         additional_exps: &[EA::Exp],
     ) {
-        if kind == ConditionKind::Decreases {
-            self.parent
-                .error(loc, "decreases specification not supported currently");
+        if matches!(kind, ConditionKind::Decreases | ConditionKind::SucceedsIf) {
+            self.parent.error(loc, "condition kind is not supported");
             return;
         }
-        if matches!(kind, ConditionKind::SucceedsIf) {
-            self.parent.error(loc, "condition kind is not supported");
+        if !matches!(
+            kind,
+            ConditionKind::Invariant | ConditionKind::InvariantUpdate | ConditionKind::Axiom
+        ) && !type_parameters.is_empty()
+        {
+            let msg = "type parameters are not allowed here";
+            let note = "type parameters are only allowed on the following cases: \
+                `invariant<..>`, `invariant<..> update`, and `axiom<..>`.";
+            self.parent
+                .error_with_notes(loc, msg, vec![note.to_owned()]);
+            return;
+        }
+        // TODO(mengxu): add support for generic conditions
+        if !type_parameters.is_empty() {
+            self.parent
+                .error(loc, "generic specification condition is not supported");
             return;
         }
         let expected_type = self.expected_type_for_condition(&kind);
@@ -1836,6 +1907,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 EA::SpecBlockMember_::Let { .. } => { /* handled above */ }
                 EA::SpecBlockMember_::Condition {
                     kind,
+                    type_parameters,
                     properties,
                     exp,
                     additional_exps,
@@ -1853,6 +1925,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                             &member_loc,
                             &context,
                             kind,
+                            type_parameters,
                             properties,
                             exp,
                             additional_exps,
@@ -2077,7 +2150,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         };
 
         // Translate type arguments
-        let mut et = self.exp_translator_for_schema(&loc, context_type_params, vars);
+        let mut et = self.exp_translator_for_schema(loc, context_type_params, vars);
         let type_arguments = &et.translate_types_opt(type_args_opt);
         if schema_entry.type_params.len() != type_arguments.len() {
             self.parent.error(
@@ -2391,7 +2464,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 // Not a function from this module
                 continue;
             }
-            let is_public = entry.is_public;
+            let is_public = matches!(entry.visibility, FunctionVisibility::Public);
             let type_arg_count = entry.type_params.len();
             let is_excluded = exclusion_patterns.iter().any(|p| {
                 self.apply_pattern_matches(fun_name.symbol, is_public, type_arg_count, true, p)

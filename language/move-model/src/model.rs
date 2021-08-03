@@ -23,10 +23,7 @@ use std::{
     rc::Rc,
 };
 
-use codespan::{
-    ByteIndex, ByteOffset, ColumnOffset, FileId, Files, LineOffset, Location, Span,
-    SpanOutOfBoundsError,
-};
+use codespan::{ByteIndex, ByteOffset, ColumnOffset, FileId, Files, LineOffset, Location, Span};
 use codespan_reporting::{
     diagnostic::{Diagnostic, Label, Severity},
     term::{emit, termcolor::WriteColor, Config},
@@ -47,6 +44,7 @@ use move_binary_format::{
         FunctionDefinitionIndex, FunctionHandleIndex, SignatureIndex, SignatureToken,
         StructDefinitionIndex, StructFieldInformation, StructHandleIndex, Visibility,
     },
+    normalized::Type as MType,
     views::{
         FieldDefinitionView, FunctionDefinitionView, FunctionHandleView, SignatureTokenView,
         StructDefinitionView, StructHandleView,
@@ -56,10 +54,11 @@ use move_binary_format::{
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage, value::MoveValue,
 };
+use move_symbol_pool::Symbol as StringSymbol;
 
 use crate::{
     ast::{
-        ConditionKind, ExpData, GlobalInvariant, ModuleName, PropertyBag, PropertyValue, Spec,
+        ConditionKind, Exp, ExpData, GlobalInvariant, ModuleName, PropertyBag, PropertyValue, Spec,
         SpecBlockInfo, SpecFunDecl, SpecVarDecl, Value,
     },
     pragmas::{
@@ -67,11 +66,10 @@ use crate::{
         INTRINSIC_PRAGMA, OPAQUE_PRAGMA, VERIFY_PRAGMA,
     },
     symbol::{Symbol, SymbolPool},
-    ty::{PrimitiveType, Type, TypeDisplayContext},
+    ty::{PrimitiveType, Type, TypeDisplayContext, TypeUnificationAdapter, Variance},
 };
 
 // import and re-expose symbols
-use crate::ast::Exp;
 pub use move_binary_format::file_format::{AbilitySet, Visibility as FunctionVisibility};
 
 // =================================================================================================
@@ -466,7 +464,7 @@ pub struct GlobalEnv {
     internal_loc: Loc,
     /// Accumulated diagnosis. In a RefCell so we can add to it without needing a mutable GlobalEnv.
     /// The boolean indicates whether the diag was reported.
-    diags: RefCell<Vec<(Diagnostic, bool)>>,
+    diags: RefCell<Vec<(Diagnostic<FileId>, bool)>>,
     /// Pool of symbols -- internalized strings.
     symbol_pool: SymbolPool,
     /// A counter for allocating node ids.
@@ -520,7 +518,7 @@ impl GlobalEnv {
             )
         };
         let unknown_loc = fake_loc("<unknown>");
-        let unknown_move_ir_loc = MoveIrLoc::new("<unknown>", Span::default());
+        let unknown_move_ir_loc = MoveIrLoc::new(StringSymbol::from("<unknown>"), 0, 0);
         let internal_loc = fake_loc("<internal>");
         GlobalEnv {
             source_files,
@@ -654,7 +652,7 @@ impl GlobalEnv {
     }
 
     /// Adds diagnostic to the environment.
-    pub fn add_diag(&self, diag: Diagnostic) {
+    pub fn add_diag(&self, diag: Diagnostic<FileId>) {
         self.diags.borrow_mut().push((diag, false));
     }
 
@@ -670,13 +668,17 @@ impl GlobalEnv {
 
     /// Adds a diagnostic of given severity to this environment.
     pub fn diag(&self, severity: Severity, loc: &Loc, msg: &str) {
-        let diag = Diagnostic::new(severity, msg, Label::new(loc.file_id, loc.span, ""));
+        let diag = Diagnostic::new(severity)
+            .with_message(msg)
+            .with_labels(vec![Label::primary(loc.file_id, loc.span)]);
         self.add_diag(diag);
     }
 
     /// Adds a diagnostic of given severity to this environment, with notes.
     pub fn diag_with_notes(&self, severity: Severity, loc: &Loc, msg: &str, notes: Vec<String>) {
-        let diag = Diagnostic::new(severity, msg, Label::new(loc.file_id, loc.span, ""));
+        let diag = Diagnostic::new(severity)
+            .with_message(msg)
+            .with_labels(vec![Label::primary(loc.file_id, loc.span)]);
         let diag = diag.with_notes(notes);
         self.add_diag(diag);
     }
@@ -689,12 +691,14 @@ impl GlobalEnv {
         msg: &str,
         labels: Vec<(Loc, String)>,
     ) {
-        let mut diag = Diagnostic::new(severity, msg, Label::new(loc.file_id, loc.span, ""));
+        let diag = Diagnostic::new(severity)
+            .with_message(msg)
+            .with_labels(vec![Label::primary(loc.file_id, loc.span)]);
         let labels = labels
             .into_iter()
-            .map(|(l, m)| Label::new(l.file_id, l.span, m))
+            .map(|(l, m)| Label::secondary(l.file_id, l.span).with_message(m))
             .collect_vec();
-        diag.secondary_labels = labels;
+        let diag = diag.with_labels(labels);
         self.add_diag(diag);
     }
 
@@ -739,13 +743,13 @@ impl GlobalEnv {
         });
         Loc {
             file_id,
-            span: loc.span(),
+            span: Span::new(loc.start(), loc.end()),
         }
     }
 
     /// Returns the file id for a file name, if defined.
-    pub fn get_file_id(&self, fname: &str) -> Option<FileId> {
-        self.file_name_map.get(fname).cloned()
+    pub fn get_file_id(&self, fname: StringSymbol) -> Option<FileId> {
+        self.file_name_map.get(fname.as_str()).cloned()
     }
 
     /// Maps a FileId to an index which can be mapped back to a FileId.
@@ -785,7 +789,7 @@ impl GlobalEnv {
     }
 
     /// Return the source text for the given location.
-    pub fn get_source(&self, loc: &Loc) -> Result<&str, SpanOutOfBoundsError> {
+    pub fn get_source(&self, loc: &Loc) -> Result<&str, codespan_reporting::files::Error> {
         self.source_files.source_slice(loc.file_id, loc.span)
     }
 
@@ -883,27 +887,20 @@ impl GlobalEnv {
     pub fn get_global_invariants_for_memory(
         &self,
         memory: &QualifiedInstId<StructId>,
-    ) -> Vec<GlobalId> {
-        self.global_invariants_for_memory
-            .get(memory)
-            .map(|ids| ids.iter().cloned().collect_vec())
-            .unwrap_or_else(Default::default)
-    }
-
-    /// Given a set of invariants, find the subset that refer to the type in mem.
-    pub fn get_subset_invariants_for_memory(
-        &self,
-        mem: QualifiedInstId<StructId>,
-        inv_set_id: &BTreeSet<GlobalId>,
     ) -> BTreeSet<GlobalId> {
-        if let Some(modifies_inv_id_set) = self.global_invariants_for_memory.get(&mem) {
-            modifies_inv_id_set
-                .intersection(inv_set_id)
-                .cloned()
-                .collect()
-        } else {
-            BTreeSet::<GlobalId>::new()
+        let mut inv_ids = BTreeSet::new();
+        for (key, val) in &self.global_invariants_for_memory {
+            if key.module_id != memory.module_id || key.id != memory.id {
+                continue;
+            }
+            assert_eq!(key.inst.len(), memory.inst.len());
+            let adapter = TypeUnificationAdapter::new_vec(&memory.inst, &key.inst, true, true);
+            let rel = adapter.unify(Variance::Allow, true);
+            if rel.is_some() {
+                inv_ids.extend(val.clone());
+            }
         }
+        inv_ids
     }
 
     pub fn get_global_invariants_by_module(&self, module_id: ModuleId) -> BTreeSet<GlobalId> {
@@ -1295,19 +1292,20 @@ impl GlobalEnv {
         sid: StructId,
         ts: &[Type],
     ) -> Option<language_storage::StructTag> {
-        if ts.iter().any(|t| t.is_open()) {
-            None
-        } else {
-            let menv = self.get_module(mid);
-            Some(language_storage::StructTag {
-                address: *menv.self_address(),
-                module: menv.get_identifier(),
-                name: menv.get_struct(sid).get_identifier(),
-                type_params: ts
-                    .iter()
-                    .map(|t| t.clone().into_type_tag(self).unwrap())
-                    .collect(),
-            })
+        self.get_struct_type(mid, sid, ts).into_struct_tag()
+    }
+
+    /// Attempt to compute a struct type for (`mid`, `sid`, `ts`).
+    pub fn get_struct_type(&self, mid: ModuleId, sid: StructId, ts: &[Type]) -> MType {
+        let menv = self.get_module(mid);
+        MType::Struct {
+            address: *menv.self_address(),
+            module: menv.get_identifier(),
+            name: menv.get_struct(sid).get_identifier(),
+            type_arguments: ts
+                .iter()
+                .map(|t| t.clone().into_normalized_type(self).unwrap())
+                .collect(),
         }
     }
 
@@ -2673,7 +2671,7 @@ impl<'env> FunctionEnv<'env> {
     /// If such pragma is not specified for this function, None is returned.
     pub fn get_ident_pragma(&self, name: &str) -> Option<Rc<String>> {
         let sym = &self.symbol_pool().make(name);
-        match self.get_spec().properties.get(&sym) {
+        match self.get_spec().properties.get(sym) {
             Some(PropertyValue::Symbol(sym)) => Some(self.symbol_pool().string(*sym)),
             Some(PropertyValue::QualifiedSymbol(qsym)) => {
                 let module_name = qsym.module_name.display(self.symbol_pool());
@@ -2691,7 +2689,7 @@ impl<'env> FunctionEnv<'env> {
     /// exists and its value represents a function in the system.
     pub fn get_func_env_from_pragma(&self, name: &str) -> Option<FunctionEnv<'env>> {
         let sym = &self.symbol_pool().make(name);
-        match self.get_spec().properties.get(&sym) {
+        match self.get_spec().properties.get(sym) {
             Some(PropertyValue::Symbol(sym)) => self.module_env.find_function(*sym),
             Some(PropertyValue::QualifiedSymbol(qsym)) => {
                 if let Some(module_env) = self.module_env.env.find_module(&qsym.module_name) {
@@ -3183,7 +3181,7 @@ impl Loc {
 
 impl<'env> fmt::Display for LocDisplay<'env> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some((fname, pos)) = self.env.get_file_and_location(&self.loc) {
+        if let Some((fname, pos)) = self.env.get_file_and_location(self.loc) {
             if self.only_line {
                 write!(f, "at {}:{}", fname, pos.line + LineOffset(1))
             } else {

@@ -23,7 +23,9 @@ mod mock_txn_manager;
 use crate::util::mock_time_service::SimulatedTimeService;
 use consensus_types::{block::block_test_utils::gen_test_certificate, common::Payload};
 use diem_types::block_info::BlockInfo;
-pub use mock_state_computer::{EmptyStateComputer, MockStateComputer};
+pub use mock_state_computer::{
+    EmptyStateComputer, MockStateComputer, RandomComputeResultStateComputer,
+};
 pub use mock_storage::{EmptyStorage, MockSharedStorage, MockStorage};
 pub use mock_txn_manager::MockTransactionManager;
 
@@ -32,7 +34,7 @@ pub const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn build_simple_tree() -> (Vec<Arc<ExecutedBlock>>, Arc<BlockStore>) {
     let mut inserter = TreeInserter::default();
     let block_store = inserter.block_store();
-    let genesis = block_store.root();
+    let genesis = block_store.ordered_root();
     let genesis_block_id = genesis.id();
     let genesis_block = block_store
         .get_block(genesis_block_id)

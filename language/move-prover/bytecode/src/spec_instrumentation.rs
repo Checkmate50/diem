@@ -45,8 +45,6 @@ const ABORTS_CODE_NOT_COVERED: &str =
     "abort code not covered by any of the `aborts_if` or `aborts_with` clauses";
 const EMITS_FAILS_MESSAGE: &str = "function does not emit the expected event";
 const EMITS_NOT_COVERED: &str = "emitted event not covered by any of the `emits` clauses";
-// This message is for the boogie wrapper, and not shown to the users.
-const EXPECTED_TO_FAIL: &str = "expected to fail";
 
 fn modify_check_fails_message(
     env: &GlobalEnv,
@@ -135,19 +133,6 @@ impl FunctionTargetProcessor for SpecInstrumentationProcessor {
                 verification_data.variant.clone(),
                 verification_data,
             );
-
-            if options.check_inconsistency {
-                // Create another clone for the inconsistency check
-                let mut new_data = data.fork(FunctionVariant::Verification(
-                    VerificationFlavor::Inconsistency,
-                ));
-                new_data = Instrumenter::run(&*options, targets, fun_env, new_data);
-                targets.insert_target_data(
-                    &fun_env.get_qualified_id(),
-                    new_data.variant.clone(),
-                    new_data,
-                );
-            }
         }
 
         // Instrument baseline variant only if it is inlined.
@@ -784,7 +769,7 @@ impl<'a> Instrumenter<'a> {
             .iter()
             .filter(|(_, is_post, ..)| *is_post == post_state);
         for (loc, _, temp, exp) in lets {
-            self.emit_traces(spec, targs, &exp);
+            self.emit_traces(spec, targs, exp);
             let exp = self.instantiate_exp(exp.to_owned(), targs);
             self.builder.set_loc(loc.to_owned());
             let assign = self
@@ -964,16 +949,6 @@ impl<'a> Instrumenter<'a> {
                 self.builder.set_loc_and_vc_info(loc, EMITS_NOT_COVERED);
                 self.builder.emit_with(move |id| Prop(id, Assert, cond));
             }
-
-            if matches!(
-                self.builder.data.variant,
-                FunctionVariant::Verification(VerificationFlavor::Inconsistency)
-            ) {
-                let loc = self.builder.fun_env.get_spec_loc();
-                self.builder.set_loc_and_vc_info(loc, EXPECTED_TO_FAIL);
-                let exp = self.builder.mk_bool_const(false);
-                self.builder.emit_with(|id| Prop(id, Assert, exp));
-            }
         }
 
         // Emit return
@@ -1054,7 +1029,7 @@ fn check_modifies(env: &GlobalEnv, targets: &FunctionTargetsHolder) {
     for module_env in env.get_modules() {
         if module_env.is_target() {
             for fun_env in module_env.get_functions() {
-                check_caller_callee_modifies_relation(&env, targets, &fun_env);
+                check_caller_callee_modifies_relation(env, targets, &fun_env);
                 check_opaque_modifies_completeness(env, targets, &fun_env);
             }
         }
@@ -1069,7 +1044,7 @@ fn check_caller_callee_modifies_relation(
     if fun_env.is_native() || fun_env.is_intrinsic() {
         return;
     }
-    let caller_func_target = targets.get_target(&fun_env, &FunctionVariant::Baseline);
+    let caller_func_target = targets.get_target(fun_env, &FunctionVariant::Baseline);
     for callee in fun_env.get_called_functions() {
         let callee_fun_env = env.get_function(callee);
         if callee_fun_env.is_native() || callee_fun_env.is_intrinsic() {

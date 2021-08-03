@@ -6,7 +6,7 @@ use colored::{control, Colorize};
 use move_binary_format::errors::{Location, VMError, VMResult};
 use move_core_types::{effects::ChangeSet, language_storage::ModuleId};
 use move_lang::{
-    errors,
+    diagnostics::{self, Diagnostic},
     unit_test::{ModuleTestPlan, TestPlan},
 };
 use std::{
@@ -208,10 +208,10 @@ impl TestFailure {
         base_message: String,
         vm_error: &Option<VMError>,
     ) -> String {
-        let report_error = if control::SHOULD_COLORIZE.should_colorize() {
-            errors::report_errors_to_color_buffer
+        let report_diagnostics = if control::SHOULD_COLORIZE.should_colorize() {
+            diagnostics::report_diagnostics_to_color_buffer
         } else {
-            errors::report_errors_to_buffer
+            diagnostics::report_diagnostics_to_buffer
         };
 
         let vm_error = match vm_error {
@@ -221,26 +221,28 @@ impl TestFailure {
 
         match vm_error.location() {
             Location::Module(module_id) => {
-                let errors = vm_error
+                let diags = vm_error
                     .offsets()
                     .iter()
                     .filter_map(|(fdef_idx, offset)| {
                         let function_source_map = test_plan
                             .module_info
-                            .get(&module_id)?
+                            .get(module_id)?
                             .1
                             .get_function_source_map(*fdef_idx)
                             .ok()?;
                         let loc = function_source_map.get_code_location(*offset)?;
                         let msg = format!("In this function in {}", format_module_id(module_id));
-                        Some(vec![
+                        // TODO(tzakian) maybe migrate off of move-langs diagnostics?
+                        Some(Diagnostic::new(
+                            diagnostics::codes::Tests::TestFailed,
                             (loc, base_message.clone()),
-                            (function_source_map.decl_location, msg),
-                        ])
+                            vec![(function_source_map.decl_location, msg)],
+                        ))
                     })
                     .collect();
 
-                String::from_utf8(report_error(test_plan.files.clone(), errors)).unwrap()
+                String::from_utf8(report_diagnostics(&test_plan.files, diags)).unwrap()
             }
             _ => base_message,
         }
@@ -300,7 +302,7 @@ impl TestResults {
             for test_result in test_results {
                 let qualified_function_name = format!(
                     "{}::{}",
-                    format_module_id(&module_id),
+                    format_module_id(module_id),
                     test_result.function_ident
                 );
                 max_function_name_size =
@@ -317,7 +319,7 @@ impl TestResults {
             for test_failure in test_failures {
                 let qualified_function_name = format!(
                     "{}::{}",
-                    format_module_id(&module_id),
+                    format_module_id(module_id),
                     test_failure.test_run_info.function_ident
                 );
                 max_function_name_size =
@@ -398,7 +400,7 @@ impl TestResults {
                 writeln!(
                     writer.lock().unwrap(),
                     "Failures in {}:",
-                    format_module_id(&module_id)
+                    format_module_id(module_id)
                 )?;
                 for test_failure in test_failures {
                     writeln!(

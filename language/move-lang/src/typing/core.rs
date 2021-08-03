@@ -3,11 +3,7 @@
 
 use crate::{
     diag,
-    errors::{
-        diagnostic_codes::{AbilitySafety, NameResolution},
-        new::Diagnostic,
-        *,
-    },
+    diagnostics::{codes::NameResolution, Diagnostic},
     expansion::ast::{AbilitySet, ModuleIdent},
     naming::ast::{
         self as N, BuiltinTypeName_, FunctionSignature, StructDefinition, StructTypeParameter,
@@ -274,7 +270,7 @@ impl<'env> Context<'env> {
             .iter()
             .filter(|(_, v, _)| !old_locals.contains_key_(v))
         {
-            self.locals.remove_(&new_local);
+            self.locals.remove_(new_local);
         }
 
         // return old type
@@ -555,10 +551,10 @@ pub fn infer_abilities(context: &Context, subst: &Subst, ty: Type) -> AbilitySet
                 TypeName_::Multiple(_) => (AbilitySet::collection(loc), ty_args),
                 TypeName_::Builtin(b) => (b.value.declared_abilities(b.loc), ty_args),
                 TypeName_::ModuleType(m, n) => {
-                    let declared_abilities = context.struct_declared_abilities(&m, &n).clone();
+                    let declared_abilities = context.struct_declared_abilities(m, n).clone();
                     let non_phantom_ty_args = ty_args
                         .into_iter()
-                        .zip(context.struct_tparams(&m, &n))
+                        .zip(context.struct_tparams(m, n))
                         .filter(|(_, param)| !param.is_phantom)
                         .map(|(arg, _)| arg)
                         .collect::<Vec<_>>();
@@ -603,8 +599,8 @@ fn debug_abilities_info(context: &Context, ty: &Type) -> (Option<Loc>, AbilitySe
             (None, b.value.declared_abilities(b.loc), ty_args.clone())
         }
         T::Apply(_, sp!(_, TypeName_::ModuleType(m, n)), ty_args) => (
-            Some(context.struct_declared_loc(&m, &n)),
-            context.struct_declared_abilities(&m, &n).clone(),
+            Some(context.struct_declared_loc(m, n)),
+            context.struct_declared_abilities(m, n).clone(),
             ty_args.clone(),
         ),
     }
@@ -906,7 +902,7 @@ pub fn solve_constraints(context: &mut Context) {
     }
     context.subst = subst;
 
-    let constraints = std::mem::replace(&mut context.constraints, vec![]);
+    let constraints = std::mem::take(&mut context.constraints);
     for constraint in constraints {
         match constraint {
             Constraint::IsImplicitlyCopyable { loc, msg, ty, fix } => {
@@ -957,10 +953,10 @@ fn solve_ability_constraint(
             Some(s) => s.clone(),
             None => format!("'{}' constraint not satisifed", constraint),
         };
-        let mut secondary_labels = vec![];
+        let mut diag = diag!(AbilitySafety::Constraint, (loc, constraint_msg));
         ability_not_satisified_tips(
             &context.subst,
-            &mut secondary_labels,
+            &mut diag,
             constraint.value,
             &ty,
             declared_loc_opt,
@@ -973,22 +969,18 @@ fn solve_ability_constraint(
 
         // is none if it is from a user constraint and not a part of the type system
         if given_msg_opt.is_none() {
-            secondary_labels.push((
+            diag.add_secondary_label((
                 constraint.loc,
                 format!("'{}' constraint declared here", constraint),
             ));
         }
-        context.env.add_diag(Diagnostic::new(
-            AbilitySafety::Constraint,
-            (loc, constraint_msg),
-            secondary_labels,
-        ))
+        context.env.add_diag(diag)
     }
 }
 
 pub fn ability_not_satisified_tips<'a>(
     subst: &Subst,
-    error: &mut Error,
+    diag: &mut Diagnostic,
     constraint: Ability_,
     ty: &Type,
     declared_loc_opt: Option<Loc>,
@@ -1000,13 +992,13 @@ pub fn ability_not_satisified_tips<'a>(
         "The type {} does not have the ability '{}'",
         ty_str, constraint
     );
-    error.push((ty.loc, ty_msg));
+    diag.add_secondary_label((ty.loc, ty_msg));
     match (
         declared_loc_opt,
         declared_abilities.has_ability_(constraint),
     ) {
         // Type was not given the ability
-        (Some(dloc), false) => error.push((
+        (Some(dloc), false) => diag.add_secondary_label((
             dloc,
             format!(
                 "To satisfy the constraint, the '{}' ability would need to be added here",
@@ -1018,10 +1010,10 @@ pub fn ability_not_satisified_tips<'a>(
         // Type has the ability but a type argument causes it to fail
         (_, true) => {
             let requirement = constraint.requires();
-            let mut error_added = false;
+            let mut label_added = false;
             for (ty_arg, ty_arg_abilities) in ty_args {
                 if !ty_arg_abilities.has_ability_(requirement) {
-                    let ty_arg_str = error_format(ty_arg, &subst);
+                    let ty_arg_str = error_format(ty_arg, subst);
                     let msg = format!(
                         "The type {ty} can have the ability '{constraint}' but the type argument \
                          {ty_arg} does not have the required ability '{requirement}'",
@@ -1030,12 +1022,12 @@ pub fn ability_not_satisified_tips<'a>(
                         constraint = constraint,
                         requirement = requirement,
                     );
-                    error.push((ty_arg.loc, msg));
-                    error_added = true;
+                    diag.add_secondary_label((ty_arg.loc, msg));
+                    label_added = true;
                     break;
                 }
             }
-            assert!(error_added)
+            assert!(label_added)
         }
     }
 }
@@ -1654,7 +1646,7 @@ fn join_bind_tvar(subst: &mut Subst, loc: Loc, tvar: TVar, ty: Type) -> Result<b
     }
 
     // check not necessary for soundness but improves error message structure
-    if !check_num_tvar(&subst, loc, tvar, &ty) {
+    if !check_num_tvar(subst, loc, tvar, &ty) {
         return Ok(false);
     }
 

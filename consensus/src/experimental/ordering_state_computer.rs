@@ -1,16 +1,25 @@
 // Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{error::StateSyncError, state_replication::StateComputer};
+use crate::{
+    error::StateSyncError, experimental::execution_phase::ExecutionChannelType,
+    state_replication::StateComputer,
+};
 use anyhow::Result;
 use channel::Sender;
 use consensus_types::{block::Block, executed_block::ExecutedBlock};
-use diem_crypto::{hash::ACCUMULATOR_PLACEHOLDER_HASH, HashValue};
+use diem_crypto::HashValue;
 use diem_types::ledger_info::LedgerInfoWithSignatures;
 use executor_types::{Error as ExecutionError, StateComputeResult};
 use fail::fail_point;
 use futures::SinkExt;
 use std::{boxed::Box, sync::Arc};
+
+use crate::{
+    experimental::{errors::Error, execution_phase::ResetAck},
+    state_replication::StateComputerCommitCallBackType,
+};
+use futures::channel::oneshot;
 
 /// Ordering-only execution proxy
 /// implements StateComputer traits.
@@ -18,12 +27,22 @@ use std::{boxed::Box, sync::Arc};
 pub struct OrderingStateComputer {
     // the channel to pour vectors of blocks into
     // the real execution phase (will be handled in ExecutionPhase).
-    executor_channel: Sender<(Vec<Block>, LedgerInfoWithSignatures)>,
+    executor_channel: Sender<ExecutionChannelType>,
+    state_computer_for_sync: Arc<dyn StateComputer>,
+    reset_event_channel_tx: Sender<oneshot::Sender<ResetAck>>,
 }
 
 impl OrderingStateComputer {
-    pub fn new(executor_channel: Sender<(Vec<Block>, LedgerInfoWithSignatures)>) -> Self {
-        Self { executor_channel }
+    pub fn new(
+        executor_channel: Sender<ExecutionChannelType>,
+        state_computer_for_sync: Arc<dyn StateComputer>,
+        reset_event_channel_tx: Sender<oneshot::Sender<ResetAck>>,
+    ) -> Self {
+        Self {
+            executor_channel,
+            state_computer_for_sync,
+            reset_event_channel_tx,
+        }
     }
 }
 
@@ -40,17 +59,7 @@ impl StateComputer for OrderingStateComputer {
         // This will break the e2e smoke test (for now because
         // no one is actually handling the next phase) if the
         // decoupled execution feature is turned on.
-        Ok(StateComputeResult::new(
-            *ACCUMULATOR_PLACEHOLDER_HASH,
-            vec![],
-            0,
-            vec![],
-            0,
-            None,
-            vec![],
-            vec![],
-            vec![],
-        ))
+        Ok(StateComputeResult::new_dummy())
     }
 
     /// Send ordered blocks to the real execution phase through the channel.
@@ -59,12 +68,19 @@ impl StateComputer for OrderingStateComputer {
         &self,
         blocks: &[Arc<ExecutedBlock>],
         finality_proof: LedgerInfoWithSignatures,
+        callback: StateComputerCommitCallBackType,
     ) -> Result<(), ExecutionError> {
+        assert!(!blocks.is_empty());
+
         let ordered_block = blocks.iter().map(|b| b.block().clone()).collect();
 
         self.executor_channel
             .clone()
-            .send((ordered_block, finality_proof))
+            .send(ExecutionChannelType(
+                ordered_block,
+                finality_proof,
+                callback,
+            ))
             .await
             .map_err(|e| ExecutionError::InternalError {
                 error: e.to_string(),
@@ -73,10 +89,21 @@ impl StateComputer for OrderingStateComputer {
     }
 
     /// Synchronize to a commit that not present locally.
-    async fn sync_to(&self, _target: LedgerInfoWithSignatures) -> Result<(), StateSyncError> {
+    async fn sync_to(&self, target: LedgerInfoWithSignatures) -> Result<(), StateSyncError> {
         fail_point!("consensus::sync_to", |_| {
             Err(anyhow::anyhow!("Injected error in sync_to").into())
         });
-        unimplemented!();
+        self.state_computer_for_sync.sync_to(target).await?;
+
+        // reset execution phase and commit phase
+        let (tx, rx) = oneshot::channel::<ResetAck>();
+        self.reset_event_channel_tx
+            .clone()
+            .send(tx)
+            .await
+            .map_err(|_| Error::ResetDropped)?;
+        rx.await.map_err(|_| Error::ResetDropped)?;
+
+        Ok(())
     }
 }

@@ -3,7 +3,8 @@
 
 #![forbid(unsafe_code)]
 
-use codespan_reporting::diagnostic::{Diagnostic, Label};
+use codespan::ByteIndex;
+use codespan_reporting::diagnostic::{Diagnostic, Label, LabelStyle};
 use itertools::Itertools;
 #[allow(unused_imports)]
 use log::warn;
@@ -25,7 +26,7 @@ use move_ir_types::location::sp;
 use move_lang::{
     self,
     compiled_unit::{self, CompiledUnit},
-    errors::Errors,
+    diagnostics::Diagnostics,
     expansion::ast::{self as E, Address, ModuleDefinition, ModuleIdent, ModuleIdent_},
     parser::ast::{self as P, ModuleName as ParserModuleName},
     shared::{unique_map::UniqueMap, AddressBytes},
@@ -37,6 +38,7 @@ use crate::{
     ast::{ModuleName, Spec},
     builder::model_builder::ModelBuilder,
     model::{FunId, FunctionData, GlobalEnv, Loc, ModuleData, ModuleId, StructId},
+    options::ModelBuilderOptions,
 };
 
 pub mod ast;
@@ -46,6 +48,7 @@ pub mod exp_generator;
 pub mod exp_rewriter;
 pub mod model;
 pub mod native;
+pub mod options;
 pub mod pragmas;
 pub mod spec_translator;
 pub mod symbol;
@@ -54,36 +57,53 @@ pub mod ty;
 // =================================================================================================
 // Entry Point
 
-/// Build the move model with default compilation flags.
+/// Build the move model with default compilation flags and default options
 /// This collects transitive dependencies for move sources from the provided directory list.
 pub fn run_model_builder(
     move_sources: &[String],
     deps_dir: &[String],
 ) -> anyhow::Result<GlobalEnv> {
-    run_model_builder_with_compilation_flags(move_sources, deps_dir, Flags::empty())
+    run_model_builder_with_options(move_sources, deps_dir, ModelBuilderOptions::default())
 }
 
-/// Build the move model with supplied compilation flags.
+/// Build the move model with default compilation flags and custom options
 /// This collects transitive dependencies for move sources from the provided directory list.
-pub fn run_model_builder_with_compilation_flags(
+pub fn run_model_builder_with_options(
     move_sources: &[String],
     deps_dir: &[String],
+    options: ModelBuilderOptions,
+) -> anyhow::Result<GlobalEnv> {
+    run_model_builder_with_options_and_compilation_flags(
+        move_sources,
+        deps_dir,
+        options,
+        Flags::empty(),
+    )
+}
+
+/// Build the move model with custom compilation flags and custom options
+/// This collects transitive dependencies for move sources from the provided directory list.
+pub fn run_model_builder_with_options_and_compilation_flags(
+    move_sources: &[String],
+    deps_dir: &[String],
+    options: ModelBuilderOptions,
     flags: Flags,
 ) -> anyhow::Result<GlobalEnv> {
     let mut env = GlobalEnv::new();
+    env.set_extension(options);
 
     // Step 1: parse the program to get comments and a separation of targets and dependencies.
     let (files, comments_and_compiler_res) = Compiler::new(move_sources, deps_dir)
         .set_flags(flags)
         .run::<PASS_PARSER>()?;
     let (comment_map, compiler) = match comments_and_compiler_res {
-        Err(errors) => {
+        Err(diags) => {
             // Add source files so that the env knows how to translate locations of parse errors
             for fname in files.keys().sorted() {
                 let fsrc = &files[fname];
-                env.add_source(fname, fsrc, /* is_dep */ false);
+                env.add_source(fname.as_str(), fsrc, /* is_dep */ false);
             }
-            add_move_lang_errors(&mut env, errors);
+            add_move_lang_diagnostics(&mut env, diags);
             return Ok(env);
         }
         Ok(res) => res,
@@ -97,13 +117,19 @@ pub fn run_model_builder_with_compilation_flags(
         .collect();
     for fname in files.keys().sorted() {
         let fsrc = &files[fname];
-        env.add_source(fname, fsrc, dep_files.contains(fname));
+        env.add_source(fname.as_str(), fsrc, dep_files.contains(fname));
     }
 
     // Add any documentation comments found by the Move compiler to the env.
     for (fname, documentation) in comment_map {
         let file_id = env.get_file_id(fname).expect("file name defined");
-        env.add_documentation(file_id, documentation);
+        env.add_documentation(
+            file_id,
+            documentation
+                .into_iter()
+                .map(|(idx, s)| (ByteIndex(idx), s))
+                .collect(),
+        )
     }
 
     // Step 2: run the compiler up to expansion
@@ -119,8 +145,8 @@ pub fn run_model_builder_with_compilation_flags(
         }
     };
     let (compiler, expansion_ast) = match compiler.at_parser(parsed_prog).run::<PASS_EXPANSION>() {
-        Err(errors) => {
-            add_move_lang_errors(&mut env, errors);
+        Err(diags) => {
+            add_move_lang_diagnostics(&mut env, diags);
             return Ok(env);
         }
         Ok(compiler) => compiler.into_ast(),
@@ -130,7 +156,7 @@ pub fn run_model_builder_with_compilation_flags(
     let mut visited_modules = BTreeSet::new();
     for (_, mident, mdef) in &expansion_ast.modules {
         let src_file = mdef.loc.file();
-        if !dep_files.contains(src_file) {
+        if !dep_files.contains(&src_file) {
             collect_related_modules_recursive(
                 mident,
                 &expansion_ast.modules,
@@ -141,7 +167,7 @@ pub fn run_model_builder_with_compilation_flags(
     }
     for sdef in expansion_ast.scripts.values() {
         let src_file = sdef.loc.file();
-        if !dep_files.contains(src_file) {
+        if !dep_files.contains(&src_file) {
             for (_, mident, _neighbor) in &sdef.immediate_neighbors {
                 collect_related_modules_recursive(
                     mident,
@@ -185,16 +211,16 @@ pub fn run_model_builder_with_compilation_flags(
         .at_expansion(expansion_ast.clone())
         .run::<PASS_COMPILATION>()
     {
-        Err(errors) => {
-            add_move_lang_errors(&mut env, errors);
+        Err(diags) => {
+            add_move_lang_diagnostics(&mut env, diags);
             return Ok(env);
         }
         Ok(compiler) => compiler.into_compiled_units(),
     };
     // Check for bytecode verifier errors (there should not be any)
-    let (verified_units, errors) = compiled_unit::verify_units(units);
-    if !errors.is_empty() {
-        add_move_lang_errors(&mut env, errors);
+    let (verified_units, diags) = compiled_unit::verify_units(units);
+    if !diags.is_empty() {
+        add_move_lang_diagnostics(&mut env, diags);
         return Ok(env);
     }
 
@@ -221,7 +247,7 @@ fn collect_related_modules_recursive<'a>(
     visited_addresses: &mut BTreeSet<&'a str>,
     visited_modules: &mut BTreeSet<ModuleIdent_>,
 ) {
-    if visited_modules.contains(&mident) {
+    if visited_modules.contains(mident) {
         return;
     }
     let mdef = modules.get_(mident).unwrap();
@@ -266,7 +292,7 @@ pub fn run_bytecode_model_builder<'a>(
             let name = m.identifier_at(m.struct_handle_at(def.struct_handle).name);
             let symbol = env.symbol_pool().make(name.as_str());
             let struct_id = StructId::new(symbol);
-            let data = env.create_struct_data(&m, def_idx, symbol, Loc::default(), Spec::default());
+            let data = env.create_struct_data(m, def_idx, symbol, Loc::default(), Spec::default());
             module_data.struct_data.insert(struct_id, data);
             module_data.struct_idx_to_id.insert(def_idx, struct_id);
         }
@@ -276,16 +302,26 @@ pub fn run_bytecode_model_builder<'a>(
     Ok(env)
 }
 
-fn add_move_lang_errors(env: &mut GlobalEnv, errors: Errors) {
-    let mk_label = |env: &mut GlobalEnv, err: (move_ir_types::location::Loc, String)| {
-        let loc = env.to_loc(&err.0);
-        Label::new(loc.file_id(), loc.span(), err.1)
+fn add_move_lang_diagnostics(env: &mut GlobalEnv, diags: Diagnostics) {
+    let mk_label = |is_primary: bool, (loc, msg): (move_ir_types::location::Loc, String)| {
+        let style = if is_primary {
+            LabelStyle::Primary
+        } else {
+            LabelStyle::Secondary
+        };
+        let loc = env.to_loc(&loc);
+        Label::new(style, loc.file_id(), loc.span()).with_message(msg)
     };
-    #[allow(deprecated)]
-    for mut labels in errors.into_vec() {
-        let primary = labels.remove(0);
-        let diag = Diagnostic::new_error("", mk_label(env, primary))
-            .with_secondary_labels(labels.into_iter().map(|e| mk_label(env, e)));
+    for (severity, msg, primary_label, secondary_labels) in diags.into_codespan_format() {
+        let diag = Diagnostic::new(severity)
+            .with_labels(vec![mk_label(true, primary_label)])
+            .with_message(msg)
+            .with_labels(
+                secondary_labels
+                    .into_iter()
+                    .map(|e| mk_label(false, e))
+                    .collect(),
+            );
         env.add_diag(diag);
     }
 }

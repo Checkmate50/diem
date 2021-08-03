@@ -69,7 +69,7 @@ impl FullnodeBuilder {
             .expect("vfn missing vfn full node network in config");
         fn_vfn.seeds = seeds;
 
-        Self::insert_waypoint_and_genesis(&mut full_node_config, &validator_config);
+        Self::insert_waypoint_and_genesis(&mut full_node_config, validator_config);
         full_node_config
     }
 
@@ -125,7 +125,6 @@ pub fn test_config() -> (NodeConfig, Ed25519PrivateKey) {
         path.path(),
         diem_framework_releases::current_module_blobs().to_vec(),
     )
-    .num_validators(1)
     .template(NodeConfig::default_for_validator());
     let (mut configs, key) = builder.build_swarm().unwrap();
 
