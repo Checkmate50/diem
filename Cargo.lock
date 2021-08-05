@@ -613,6 +613,7 @@ dependencies = [
  "num 0.4.0",
  "once_cell",
  "petgraph",
+ "read-write-set-types",
  "serde",
  "serde_json",
 ]
@@ -3274,6 +3275,7 @@ dependencies = [
  "rand 0.8.3",
  "rand_core 0.6.2",
  "rayon",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -4091,6 +4093,7 @@ dependencies = [
  "ir-to-bytecode-syntax",
  "log",
  "move-binary-format",
+ "move-command-line-common",
  "move-core-types",
  "move-ir-types",
  "move-symbol-pool",
@@ -6270,7 +6273,18 @@ dependencies = [
  "move-core-types",
  "move-model",
  "move-vm-runtime",
+ "read-write-set-types",
  "resource-viewer",
+]
+
+[[package]]
+name = "read-write-set-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "diem-workspace-hack",
+ "move-binary-format",
+ "move-core-types",
 ]
 
 [[package]]
