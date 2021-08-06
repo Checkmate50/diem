@@ -6020,6 +6020,8 @@ dependencies = [
  "bytecode",
  "chrono",
  "clap",
+ "codespan",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "hex",
