@@ -195,6 +195,7 @@ default-members = [
     "language/diem-framework",
     "language/move-prover",
     "language/move-prover/lab",
+    "language/move-prover/mutation",
     "language/move-lang",
     "language/move-stdlib",
     "language/tools/disassembler",

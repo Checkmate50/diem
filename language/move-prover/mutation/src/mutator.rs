@@ -163,11 +163,7 @@ impl Runner {
         for module in env.get_modules() {
             if module.is_target() {
                 self.mutate_module(module)?;
-                let mm = env.get_extension::<MutationManager>();
-                mutated = match mm {
-                    Some(x) => x.mutated,
-                    None => false,
-                };
+                let mutated = env.get_extension::<MutationManager>().map(|e| e.mutated).unwrap_or(false);
                 if mutated {
                    break;
                 }

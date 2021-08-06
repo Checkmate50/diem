@@ -19,7 +19,7 @@ dependencies = [
  "anyhow",
  "bcs",
  "bytecode-verifier",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "heck",
@@ -518,8 +518,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytecode",
- "codespan 0.11.1",
- "codespan-reporting 0.11.1",
+ "codespan",
+ "codespan-reporting",
  "diem-workspace-hack",
  "futures",
  "itertools 0.10.0",
@@ -597,8 +597,8 @@ dependencies = [
  "anyhow",
  "borrow-graph",
  "bytecode-verifier",
- "codespan 0.11.1",
- "codespan-reporting 0.11.1",
+ "codespan",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "im",
@@ -625,7 +625,7 @@ dependencies = [
  "anyhow",
  "bytecode",
  "bytecode-interpreter-crypto",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "itertools 0.10.0",
@@ -671,7 +671,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bcs",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "diem-workspace-hack",
  "move-binary-format",
  "move-core-types",
@@ -997,32 +997,12 @@ dependencies = [
 
 [[package]]
 name = "codespan"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52899426b69706219a1aaee2e95868fd01a0bd8006bb163f069578a0af5b5bb2"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "codespan"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3362992a0d9f1dd7c3d0e89e0ab2bb540b7a95fea8cd798090e758fda2899b5e"
 dependencies = [
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "serde",
-]
-
-[[package]]
-name = "codespan-reporting"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "600c3317d4705222ff820139aaa76a3a208024ffc41f894da565a4c3b949d4c9"
-dependencies = [
- "codespan 0.8.0",
- "termcolor",
- "unicode-width",
 ]
 
 [[package]]
@@ -2635,7 +2615,7 @@ dependencies = [
  "cc",
  "chrono",
  "clap",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "crossbeam-channel",
  "crossbeam-deque",
  "crossbeam-utils",
@@ -2898,8 +2878,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytecode",
- "codespan 0.11.1",
- "codespan-reporting 0.11.1",
+ "codespan",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "itertools 0.10.0",
@@ -3037,7 +3017,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bcs",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "log",
@@ -4091,7 +4071,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytecode-source-map",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "diem-workspace-hack",
  "ir-to-bytecode-syntax",
  "log",
@@ -4695,7 +4675,7 @@ dependencies = [
  "bcs",
  "bytecode-source-map",
  "bytecode-verifier",
- "codespan 0.11.1",
+ "codespan",
  "colored",
  "diem-workspace-hack",
  "move-binary-format",
@@ -4741,7 +4721,7 @@ dependencies = [
  "borrow-graph",
  "bytecode-source-map",
  "bytecode-verifier",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "difference",
@@ -4806,8 +4786,8 @@ dependencies = [
  "anyhow",
  "bytecode-source-map",
  "bytecode-verifier",
- "codespan 0.11.1",
- "codespan-reporting 0.11.1",
+ "codespan",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "disassembler",
@@ -4891,8 +4871,8 @@ dependencies = [
  "bytecode",
  "bytecode-interpreter",
  "clap",
- "codespan 0.11.1",
- "codespan-reporting 0.11.1",
+ "codespan",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "docgen",
@@ -6015,7 +5995,7 @@ dependencies = [
  "bytecode",
  "chrono",
  "clap",
- "codespan-reporting 0.11.1",
+ "codespan-reporting",
  "datatest-stable",
  "diem-workspace-hack",
  "hex",
@@ -6040,8 +6020,6 @@ dependencies = [
  "bytecode",
  "chrono",
  "clap",
- "codespan 0.8.0",
- "codespan-reporting 0.8.0",
  "datatest-stable",
  "diem-workspace-hack",
  "hex",
