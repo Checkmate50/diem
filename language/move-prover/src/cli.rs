@@ -533,8 +533,10 @@ impl Options {
             options.prover.mutation = true;
         }
         if matches.is_present("mutation_add_sub") {
-            options.prover.mutation_add_sub =
-                matches.value_of("mutation_add_sub").unwrap().parse::<usize>()?;
+            options.prover.mutation_add_sub = matches
+                .value_of("mutation_add_sub")
+                .unwrap()
+                .parse::<usize>()?;
         }
         if matches.is_present("verify") {
             options.prover.verify_scope = match matches.value_of("verify").unwrap() {

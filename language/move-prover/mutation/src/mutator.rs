@@ -3,14 +3,11 @@
 
 // Functions for running move programs with mutations and reporting errors if found
 
-use bytecode::{
-    options::ProverOptions,
-    mutation_tester::MutationManager,
-};
+use bytecode::{mutation_tester::MutationManager, options::ProverOptions};
 use clap::{App, Arg};
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
-use log::LevelFilter;
 use itertools::Itertools;
+use log::LevelFilter;
 use move_model::{
     model::{GlobalEnv, ModuleEnv, VerificationScope},
     run_model_builder,
@@ -19,7 +16,7 @@ use move_prover::{
     check_errors, cli::Options, create_and_process_bytecode, generate_boogie, verify_boogie,
 };
 use std::{
-    io::{Write},
+    io::Write,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -131,10 +128,7 @@ fn apply_mutation(
 
     let config_descr = "default".to_string();
 
-    println!(
-        "Starting mutations with config `{}`.",
-        config_descr
-    );
+    println!("Starting mutations with config `{}`.", config_descr);
 
     let mut i = 0;
     let mut mutation_applied = true;
@@ -163,9 +157,12 @@ impl Runner {
         for module in env.get_modules() {
             if module.is_target() {
                 self.mutate_module(module)?;
-                mutated = env.get_extension::<MutationManager>().map(|e| e.mutated).unwrap_or(false);
+                mutated = env
+                    .get_extension::<MutationManager>()
+                    .map(|e| e.mutated)
+                    .unwrap_or(false);
                 if mutated {
-                   break;
+                    break;
                 }
             }
         }
@@ -200,7 +197,7 @@ impl Runner {
         )?;
 
         // Generate boogie code.
-        let code_writer = generate_boogie(&env, &self.options, &targets)?;
+        let code_writer = generate_boogie(env, &self.options, &targets)?;
         check_errors(
             env,
             &self.options,
@@ -210,7 +207,7 @@ impl Runner {
 
         // Verify boogie, measuring duration.
         let now = Instant::now();
-        verify_boogie(&env, &self.options, &targets, code_writer)?;
+        verify_boogie(env, &self.options, &targets, code_writer)?;
 
         // Determine result status.
         let status = if env.error_count() > 0 {
