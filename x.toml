@@ -4,6 +4,7 @@ version = "0.8.0"
 [system-tests]
 smoke-test = { path = "smoke-test" }
 jsonrpc-integration-tests = { path = "json-rpc/integration-tests" }
+compatibility-test = { path = "testsuite/compatibility-test" }
 
 [cargo.sccache]
 bucket = "ci-artifacts.diem.com"
@@ -178,8 +179,10 @@ members = [
 
     "bytecode-interpreter-testsuite",
     "bytecode-verifier-tests",
+    "bytecode-verifier-transactional-tests",
     "cli",
     "cluster-test",
+    "compatibility-test",
     "diem-documentation-tool",
     "diem-e2e-tests-replay",
     "diem-fuzz",
@@ -196,6 +199,7 @@ members = [
     "executor-benchmark",
     "executor-test-helpers",
     "forge",
+    "forge-cli",
     "functional-tests",
     "generate-format",
     "invalid-mutations",
@@ -213,6 +217,7 @@ members = [
     "move-lang-test-utils",
     "move-oncall-trainer",
     "move-prover-test-utils",
+    "move-transactional-test-runner",
     "move-vm-integration-tests",
     "offchain",
     "scratchpad-benchmark",

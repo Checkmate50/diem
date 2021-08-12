@@ -81,7 +81,10 @@ pub fn forge_main<F: Factory>(tests: ForgeConfig<'_>, factory: F, options: &Opti
 
     match forge.run() {
         Ok(()) => Ok(()),
-        Err(_) => process::exit(101), // Exit with a non-zero exit code if tests failed
+        Err(e) => {
+            eprintln!("Failed to run tests:\n{}", e);
+            process::exit(101); // Exit with a non-zero exit code if tests failed
+        }
     }
 }
 
@@ -211,9 +214,11 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
         if test_count > 0 {
             let initial_version = self.initial_version();
             let mut rng = ::rand::rngs::StdRng::from_seed(OsRng.gen());
-            let mut swarm = self
-                .factory
-                .launch_swarm(self.tests.initial_validator_count, &initial_version)?;
+            let mut swarm = self.factory.launch_swarm(
+                &mut rng,
+                self.tests.initial_validator_count,
+                &initial_version,
+            )?;
 
             // Run PublicUsageTests
             for test in self.filter_tests(self.tests.public_usage_tests.iter()) {

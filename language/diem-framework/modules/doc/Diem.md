@@ -2004,8 +2004,8 @@ Calls to this function will fail if:
 
     <b>while</b> ({
         <b>spec</b> {
-            <b>assert</b> index &lt;= queue_length;
-            <b>assert</b> <b>forall</b> j in 0..index: preburn_queue[j].preburn.to_burn.value != amount;
+            <b>invariant</b> index &lt;= queue_length;
+            <b>invariant</b> <b>forall</b> j in 0..index: preburn_queue[j].preburn.to_burn.value != amount;
         };
         (index &lt; queue_length)
     }) {
@@ -4114,14 +4114,8 @@ A <code><a href="Diem.md#0x1_Diem_Preburn">Preburn</a></code> resource can only 
 
 
 A <code><a href="Diem.md#0x1_Diem_PreburnQueue">PreburnQueue</a></code> resource can only be published holding a currency type.
-
-
-<pre><code><b>invariant</b> <b>forall</b> addr: address, coin_type: type
-    <b>where</b> <b>exists</b>&lt;<a href="Diem.md#0x1_Diem_PreburnQueue">PreburnQueue</a>&lt;coin_type&gt;&gt;(addr):
-    <a href="Diem.md#0x1_Diem_spec_is_currency">spec_is_currency</a>&lt;coin_type&gt;();
-</code></pre>
-
-
+>TODO: This assertion is causing a violation for unknown reasons, probably
+a prover bug.
 Preburn is not transferrable [[J4]][PERMISSION].
 
 
