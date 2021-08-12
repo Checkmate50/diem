@@ -160,11 +160,7 @@ impl Runner {
         for module in env.get_modules() {
             if module.is_target() {
                 for fun in module.get_functions() {
-                    self.mutate_function(fun)?;
-                    mutated = env
-                        .get_extension::<MutationManager>()
-                        .map(|e| e.mutated)
-                        .unwrap_or(false);
+                    mutated = self.mutate_function(fun)?;
                     if mutated {
                         break;
                     }
@@ -174,9 +170,7 @@ impl Runner {
         Ok(mutated)
     }
 
-    fn mutate_function(&mut self, fun: FunctionEnv<'_>) -> anyhow::Result<()> {
-        print!("running function {} ..", fun.get_full_name_str());
-        std::io::stdout().flush()?;
+    fn mutate_function(&mut self, fun: FunctionEnv<'_>) -> anyhow::Result<bool> {
 
         // Scope verification to the given function
         let env = fun.module_env.env;
@@ -185,8 +179,16 @@ impl Runner {
         // Run benchmark
         let (duration, status) = self.run_mutated_function(fun.module_env.env)?;
 
-        println!("\x08\x08{:.3}s {}.", duration.as_secs_f64(), status);
-        Ok(())
+        let mutated = env
+            .get_extension::<MutationManager>()
+            .map(|e| e.mutated)
+            .unwrap_or(false);
+        if mutated {
+            print!("mutated function {} ..", fun.get_full_name_str());
+            std::io::stdout().flush()?;
+            println!("\x08\x08{:.3}s {}.", duration.as_secs_f64(), status);
+        }
+        Ok(mutated)
     }
 
     fn run_mutated_function(&mut self, env: &GlobalEnv) -> anyhow::Result<(Duration, String)> {
