@@ -171,12 +171,10 @@ impl Runner {
     }
 
     fn mutate_function(&mut self, fun: FunctionEnv<'_>) -> anyhow::Result<bool> {
-
         // Scope verification to the given function
         let env = fun.module_env.env;
         self.options.prover.verify_scope = VerificationScope::Only(fun.get_full_name_str());
         ProverOptions::set(env, self.options.prover.clone());
-        // Run benchmark
         let (duration, status) = self.run_mutated_function(fun.module_env.env)?;
 
         let mutated = env
