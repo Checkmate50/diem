@@ -212,6 +212,13 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
         summary.write_starting_msg()?;
 
         if test_count > 0 {
+            println!(
+                "Starting Swarm with supported versions: {:?}",
+                self.factory
+                    .versions()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+            );
             let initial_version = self.initial_version();
             let mut rng = ::rand::rngs::StdRng::from_seed(OsRng.gen());
             let mut swarm = self.factory.launch_swarm(
@@ -244,6 +251,14 @@ impl<'cfg, F: Factory> Forge<'cfg, F> {
                     NetworkContext::new(CoreContext::from_rng(&mut rng), &mut *swarm, report);
                 let result = run_test(|| test.run(&mut network_ctx));
                 summary.handle_result(test.name().to_owned(), result)?;
+            }
+
+            io::stdout().flush()?;
+            io::stderr().flush()?;
+
+            if !summary.success() {
+                println!();
+                println!("Swarm logs can be found here: {}", swarm.logs_location());
             }
         }
 

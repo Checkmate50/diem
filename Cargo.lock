@@ -1768,6 +1768,7 @@ dependencies = [
  "move-lang",
  "move-prover",
  "move-stdlib",
+ "move-symbol-pool",
  "move-unit-test",
  "move-vm-runtime",
  "move-vm-types",
@@ -1967,6 +1968,7 @@ dependencies = [
  "rand 0.8.3",
  "regex",
  "reqwest",
+ "resource-viewer",
  "scratchpad",
  "serde",
  "serde_json",
@@ -3294,6 +3296,8 @@ dependencies = [
 name = "forge-cli"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "compatibility-test",
  "diem-sdk",
  "diem-workspace-hack",
  "forge",
@@ -4599,6 +4603,7 @@ dependencies = [
  "move-binary-format",
  "move-core-types",
  "move-ir-types",
+ "move-symbol-pool",
  "rand 0.8.3",
 ]
 
@@ -4665,6 +4670,7 @@ dependencies = [
  "move-coverage",
  "move-lang",
  "move-stdlib",
+ "move-symbol-pool",
  "move-vm-runtime",
  "move-vm-types",
  "once_cell",
@@ -4673,6 +4679,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "structopt 0.3.21",
+ "tempfile",
  "walkdir",
 ]
 
@@ -5141,6 +5148,18 @@ dependencies = [
  "safemem",
  "tempfile",
  "twoway",
+]
+
+[[package]]
+name = "mvhashmap"
+version = "0.1.0"
+dependencies = [
+ "diem-workspace-hack",
+ "num_cpus",
+ "once_cell",
+ "proptest",
+ "proptest-derive",
+ "rayon",
 ]
 
 [[package]]
@@ -6500,7 +6519,6 @@ dependencies = [
  "move-vm-types",
  "once_cell",
  "serde",
- "serde_json",
 ]
 
 [[package]]
