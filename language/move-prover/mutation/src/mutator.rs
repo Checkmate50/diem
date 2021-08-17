@@ -145,6 +145,63 @@ fn apply_mutation(
         env.set_extension(MutationManager {
             mutated: false,
             add_sub: i,
+            sub_add: 0,
+            mul_div: 0,
+            div_mul: 0,
+        });
+        mutation_applied = runner.mutate(&env)?;
+        if !mutation_applied {
+            println!("No mutations applied");
+        }
+    }
+    i = 0;
+    mutation_applied = true;
+    while mutation_applied {
+        i += 1;
+        println!("Applying sub-add mutation {}", i);
+        runner.options.prover.mutation_sub_add = i;
+        env.set_extension(MutationManager {
+            mutated: false,
+            add_sub: 0,
+            sub_add: i,
+            mul_div: 0,
+            div_mul: 0,
+        });
+        mutation_applied = runner.mutate(&env)?;
+        if !mutation_applied {
+            println!("No mutations applied");
+        }
+    }
+    i = 0;
+    mutation_applied = true;
+    while mutation_applied {
+        i += 1;
+        println!("Applying mul-div mutation {}", i);
+        runner.options.prover.mutation_mul_div = i;
+        env.set_extension(MutationManager {
+            mutated: false,
+            add_sub: 0,
+            sub_add: 0,
+            mul_div: i,
+            div_mul: 0,
+        });
+        mutation_applied = runner.mutate(&env)?;
+        if !mutation_applied {
+            println!("No mutations applied");
+        }
+    }
+    i = 0;
+    mutation_applied = true;
+    while mutation_applied {
+        i += 1;
+        println!("Applying div-mul mutation {}", i);
+        runner.options.prover.mutation_div_mul = i;
+        env.set_extension(MutationManager {
+            mutated: false,
+            add_sub: 0,
+            sub_add: 0,
+            mul_div: 0,
+            div_mul: i,
         });
         mutation_applied = runner.mutate(&env)?;
         if !mutation_applied {
