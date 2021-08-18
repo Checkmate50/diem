@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["compatibility_test"] = [{"text":"impl <a class=\"trait\" href=\"forge/interface/network/trait.NetworkTest.html\" title=\"trait forge::interface::network::NetworkTest\">NetworkTest</a> for <a class=\"struct\" href=\"compatibility_test/struct.SimpleValidatorUpgrade.html\" title=\"struct compatibility_test::SimpleValidatorUpgrade\">SimpleValidatorUpgrade</a>","synthetic":false,"types":["compatibility_test::SimpleValidatorUpgrade"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
